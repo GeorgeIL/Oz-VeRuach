@@ -98,3 +98,7 @@ if __name__ == "__main__":
     # hw1.print_five(10)
     # Invalid input (string in list)
     # hw1.print_five(":<")
+
+    import matplotlib.pyplot as plt
+
+   plt.sc
