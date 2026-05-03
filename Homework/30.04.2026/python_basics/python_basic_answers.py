@@ -1,15 +1,20 @@
+# Import the helper file (for helper functions)
+import helper as helper
+
 """
 Question 1)
 1. Create a list with identification information about your self
 2. Print using a loop
 """
 
-# List creation
-id_list = ["Giora", "Glovatsky", "26", "0548888888"]
 
-# List printing using a loop
-for item in id_list:
-    print(item)
+def question_1():
+    # List creation
+    id_list = ["Giora", "Glovatsky", "26", "0548888888"]
+
+    # List printing using a loop
+    for item in id_list:
+        print(item)
 
 
 """
@@ -17,16 +22,19 @@ Question 2)
 1. Create a dictionary instead of a list from question 1 with relevant keys for each field
 2. Print using a loop
 """
-# Dictionary creation
-id_dict = {
-    ("name", "last_name"): "Giora Glovatsky",
-    "age": "26",
-    "phone_num": "0548888888",
-}
 
-# Dictionary printing using a loop
-for k, v in id_dict.items():
-    print(f"{k}:{v}")
+
+def question_2():
+    # Dictionary creation
+    id_dict = {
+        ("name", "last_name"): "Giora Glovatsky",
+        "age": "26",
+        "phone_num": "0548888888",
+    }
+
+    # Dictionary printing using a loop
+    for k, v in id_dict.items():
+        print(f"{k}:{v}")
 
 
 """
@@ -36,38 +44,21 @@ Question 3)
     * Values must be integers
 2. Print the new list created
 """
-list_int1 = [1, 2, 3, 4, 5]
-list_int2 = [12, 4, 3, 4, 5]
-list_wrong_val = [111, 4, 3, "hi", 5]
-list_wrong_len = [12, 4, 3, 4, 53, 4, 5]
 
 
 def combine_lists_greatest_value(list1: list, list2: list):
     # Check the length of both lists
     if len(list1) != len(list2):
         raise ValueError("list1 and list2 must have the same length!")
+
     # Check the types in both lists
-    if not all(isinstance(x, int) for x in list1) or not all(
-        isinstance(x, int) for x in list2
-    ):
-        raise TypeError("All elements in both lists must be integers")
+    helper.all_instance_checker(*list1, *list2, type_check=int)
 
     # Make a new list and get the largest value from each list given (using list comprehension)
     list_new = [
         list1[i] if list1[i] > list2[i] else list2[i] for i in range(len(list1))
     ]
     return list_new
-
-
-# # Tests
-
-# # List length error check
-# print(combine_lists_greatest_value(list_int2, list_wrong_len))
-# # List type error check
-# print(combine_lists_greatest_value(list_int1, list_wrong_val))
-
-# Valid input check
-print(combine_lists_greatest_value(list_int1, list_int2))
 
 
 """
@@ -99,11 +90,6 @@ def count_even_odd(list1: list):
     print(f"Number of odd counters: {odd_c}")
 
 
-# Tests (using question 3's lists)
-count_even_odd(list_int1)
-count_even_odd(list_wrong_val)
-
-
 """
 Question 5)
 1. Create a Python script to generate and print a dictionary 
@@ -126,23 +112,15 @@ def n_plus_three_dict(n: int):
     return dict_return
 
 
-n_plus_three_dict(5)
-
-
 """
 Question 6)
 1. Create a Python script to concatenate x dictionaries 
 """
-dic1 = {1: 10, 2: 20}
-dic2 = {2: 30, 4: 40}
-dic_dupe = {1: 30, 2: 40}
-dic3 = {5: 50, 6: 60}
 
 
 def concatenate_dicts(*dicts: dict):
     # Raise type error if not all dicts are actual dictionaries
-    if not all(isinstance(dic, dict) for dic in dicts):
-        raise TypeError("All values given must be of dict type!")
+    helper.all_instance_checker(*dicts, type_check=dict)
 
     # Concatenate all dicts into one
     c_dict = dict()
@@ -168,6 +146,11 @@ Question 7)
 
 
 def create_char_dict(string: str):
+
+    # Check instance of string
+    if not isinstance(string, str):
+        raise TypeError("Input must be of string type!")
+
     char_dict = dict()
     for char in string:
         # If we counted the char previously raise the count by 1
@@ -181,21 +164,113 @@ def create_char_dict(string: str):
     return char_dict
 
 
-if __name__ == "__main__":
-    print(concatenate_dicts(dic1, dic2, dic3))
+"""
+Question 8)
+1. Write a python function that will combine 2 dicts into 1
+    * If there are duplicate keys, the value will be combined
+"""
 
 
-# Question 6)
+def combine_two_dict(dic1: dict, dic2: dict):
 
-# Tests
-# Valid input
-print(concatenate_dicts(dic1, dic2, dic3))
-# # Dict with dupe keys (dic1[1], dic_dupe[1])
-# print(concatenate_dicts(dic1, dic2, dic3, dic_dupe))
-# # String inserted into args
-# concatenate_dicts(dic1, "dic2", dic3)
+    # Check if both inputs are dicts
+    if not isinstance(dic1, dict) or not isinstance(dic2, dict):
+        raise TypeError("Both inputs must be of dict type!")
+
+    # Check if all values in both dicts are integers or floats (to avoid type errors when combining values)
+    helper.all_instance_checker(*dic1.values(), *dic2.values(), type_check=(int, float))
+
+    returned_dict = dict()
+    for item1 in dic1.items():
+        for item2 in dic2.items():
+            # If the keys are the same, combine the values and add to the returned dict
+            if item1[0] == item2[0]:
+                returned_dict[item1[0]] = item1[1] + item2[1]
+                break
+            # If the keys are different, add both to the returned dict
+            returned_dict[item1[0]] = item1[1]
+            returned_dict[item2[0]] = item2[1]
+
+    # Return the dictionary
+    return returned_dict
 
 
-# Question 7)
-print(create_char_dict("HANNA"))
-print(create_char_dict("HANNA MONTANA"))
+"""
+Question 9)
+1. Write a python function takes a lists and returns a list without duplicates
+"""
+
+
+def get_unique_list(lst: list):
+
+    # Check if input is a list
+    if not isinstance(lst, list):
+        raise TypeError("Input must be of list type!")
+
+    # Create a new list without duplicates
+    unique_list = []
+    for item in lst:
+        if item not in unique_list:
+            unique_list.append(item)
+
+    # Return the new list
+    return unique_list
+
+
+"""
+Question 10)
+1. Write a python function takes a number input and builds a number pyramid using nested loops
+"""
+
+
+def print_number_pyramid(n: int):
+
+    # Check if input is an int
+    if not isinstance(n, int):
+        raise TypeError("Input must be of int type!")
+
+    for i in range(n):
+        # +2 to cover the +1 of n, and +1 for j to not stop the loop preemptively
+        for j in range(1, i + 2):
+            print(j, end="")
+        # Go down a line
+        print()
+
+
+def print_five(n: int):
+
+    # Check if input is an int
+    if not isinstance(n, int):
+        raise TypeError("Input must be of int type!")
+
+    # Top part
+    for _ in range(n):
+        print("*", end="")
+    print()
+
+    # Neck part
+    for _ in range(n // 2):
+        print("*")
+
+    # Middle part
+    storage = n + 1
+    for _ in range(2):
+        print(" ", end="")
+    storage -= n // 2
+    for _ in range(n - 1):
+        print("*", end="")
+    print()
+
+    # Neck (front) part
+    for _ in range(n // 2):
+        for _ in range(n + 2):
+            print(" ", end="")
+        print("*")
+
+    # Bottom part
+    for _ in range(n):
+        print("*", end="")
+    print()
+
+
+
