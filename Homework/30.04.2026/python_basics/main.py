@@ -2,17 +2,17 @@ import python_basic_answers as hw1
 
 if __name__ == "__main__":
 
-    """Question 1 tests:"""
+    """Question 1"""
 
     # # Test
     # hw1.question_1()
 
-    """Question 2 tests:"""
+    """Question 2"""
 
     # # Test
     # hw1.question_2()
 
-    """Question 3 tests:"""
+    """Question 3"""
 
     list_int1 = [1, 2, 3, 4, 5]
     list_int2 = [12, 4, 3, 4, 5]
@@ -27,13 +27,13 @@ if __name__ == "__main__":
     # # List type error check
     # print(hw1.combine_lists_greatest_value(list_int1, list_wrong_val))
 
-    """Question 4 tests:"""
+    """Question 4"""
 
     # # Tests (using question 3's lists)
     # hw1.count_even_odd(list_int1)
     # hw1.count_even_odd(list_wrong_val)
 
-    """Question 5 tests:"""
+    """Question 5"""
 
     # # Tests
     # # Valid input
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     # # Invalid input (string)
     # hw1.n_plus_three_dict("5")
 
-    """Question 6 tests:"""
+    """Question 6"""
 
     dic1 = {1: 10, 2: 20}
     dic2 = {3: 30, 4: 40}
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     # # String inserted into args
     # hw1.concatenate_dicts(dic1, "dic2", dic3)
 
-    """Question 7 tests:"""
+    """Question 7"""
 
     # # Tests
     # # Valid input
@@ -64,7 +64,7 @@ if __name__ == "__main__":
     # # Invalid input (number)
     # print(hw1.create_char_dict(2))
 
-    """Question 8 tests:"""
+    """Question 8"""
 
     # # Tests
     # # Valid input
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     # # Dict with string as value
     # print(hw1.combine_two_dict({"a": 1, "b": 2}, {"b": "not a number", "c": 4}))
 
-    """Question 9 tests:"""
+    """Question 9"""
 
     # # Tests
     # # Valid input
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     # # Invalid input (string in list)
     # print(hw1.get_unique_list("not a list"))
 
-    """Question 10 tests:"""
+    """Question 10"""
 
     # # Tests
     # # Valid input
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     # # Invalid input (string in list)
     # hw1.print_number_pyramid(":)")
 
-    """Question 11 tests:"""
+    """Question 11"""
 
     # # Tests
     # # Valid input
@@ -98,7 +98,3 @@ if __name__ == "__main__":
     # hw1.print_five(10)
     # Invalid input (string in list)
     # hw1.print_five(":<")
-
-    import matplotlib.pyplot as plt
-
-   plt.sc
