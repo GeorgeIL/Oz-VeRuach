@@ -99,8 +99,8 @@ Question 5)
 
 def n_plus_three_dict(n: int):
     # Edge case check - number is not int
-    if not isinstance(n, int):
-        raise TypeError("'n' must be of integer type!")
+    helper.all_instance_checker(n, type_check=int)
+
     # Dict making
     dict_return = dict()
     for i in range(1, n + 1):
@@ -148,8 +148,7 @@ Question 7)
 def create_char_dict(string: str):
 
     # Check instance of string
-    if not isinstance(string, str):
-        raise TypeError("Input must be of string type!")
+    helper.all_instance_checker(string, type_check=str)
 
     char_dict = dict()
     for char in string:
@@ -174,8 +173,7 @@ Question 8)
 def combine_two_dict(dic1: dict, dic2: dict):
 
     # Check if both inputs are dicts
-    if not isinstance(dic1, dict) or not isinstance(dic2, dict):
-        raise TypeError("Both inputs must be of dict type!")
+    helper.all_instance_checker(dic1, dic2, type_check=dict)
 
     # Check if all values in both dicts are integers or floats (to avoid type errors when combining values)
     helper.all_instance_checker(*dic1.values(), *dic2.values(), type_check=(int, float))
@@ -204,8 +202,7 @@ Question 9)
 def get_unique_list(lst: list):
 
     # Check if input is a list
-    if not isinstance(lst, list):
-        raise TypeError("Input must be of list type!")
+    helper.all_instance_checker(lst, type_check=list)
 
     # Create a new list without duplicates
     unique_list = []
@@ -226,8 +223,7 @@ Question 10)
 def print_number_pyramid(n: int):
 
     # Check if input is an int
-    if not isinstance(n, int):
-        raise TypeError("Input must be of int type!")
+    helper.all_instance_checker(n, type_check=int)
 
     for i in range(n):
         # +2 to cover the +1 of n, and +1 for j to not stop the loop preemptively
@@ -240,8 +236,7 @@ def print_number_pyramid(n: int):
 def print_five(n: int):
 
     # Check if input is an int
-    if not isinstance(n, int):
-        raise TypeError("Input must be of int type!")
+    helper.all_instance_checker(n, type_check=int)
 
     # Top part
     for _ in range(n):
@@ -271,6 +266,3 @@ def print_five(n: int):
     for _ in range(n):
         print("*", end="")
     print()
-
-
-

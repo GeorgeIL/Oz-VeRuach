@@ -34,7 +34,7 @@ Second Python basics assignment.
 
 - Source: `HW2.docx`
 - Files:
-  - `*classes/*` (OOP structure)
+  - `classes/` (OOP structure)
     - Contains classes need for the assignment
   - `text_files/` (text documents)
     - Contains text files need for the assignment
