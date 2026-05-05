@@ -14,4 +14,3 @@ class Helper:
     # Because we touch the class attribute 'global_string' it will be a class method.
     def print_string(cls):
         print(cls.global_string.upper())
-

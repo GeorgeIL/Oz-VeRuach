@@ -116,21 +116,28 @@ if __name__ == "__main__":
     # print(hw2.recursive_power("-4", -4))
 
     """Question 15"""
-   
 
-# Tests
-# --- PASS tests (expected: True) ---
-print(hw2.is_valid_parenthesis("(())"), "Expected: True")  # nested same type
-print(hw2.is_valid_parenthesis("()[]{}"), "Expected: True")  # three sequential pairs
-print(hw2.is_valid_parenthesis("{[()]}"), "Expected: True")  # all three types nested
-print(hw2.is_valid_parenthesis("hello world"), "Expected: True")  # no parenthesis at all
-print(
-    hw2.is_valid_parenthesis("Hi (there) [!]"), "Expected: True"
-)  # mixed text with valid pairs
+    # Tests
+    # --- PASS tests (expected: True) ---
+    # nested same type
+    print(hw2.is_valid_parenthesis("(())"), "Expected: True")
+    # three sequential pairs
+    print(hw2.is_valid_parenthesis("()[]{}"), "Expected: True")
+    # all three types nested
+    print(hw2.is_valid_parenthesis("{[()]}"), "Expected: True")
+    # no parenthesis at all
+    print(hw2.is_valid_parenthesis("hello world"), "Expected: True")
+    # mixed text with valid pairs
+    print(hw2.is_valid_parenthesis("Hi (there) [!]"), "Expected: True")
 
-# --- FAIL tests (expected: False) ---
-print(hw2.is_valid_parenthesis("(]"), "Expected: False")  # mismatched types
-print(hw2.is_valid_parenthesis("([)]"), "Expected: False")  # incorrectly interleaved
-print(hw2.is_valid_parenthesis("{[]"), "Expected: False")  # missing closing brace
-print(hw2.is_valid_parenthesis(")("), "Expected: False")  # closer before opener
-print(hw2.is_valid_parenthesis("())(()"), "Expected: False")  # extra closer in middle
+    # --- FAIL tests (expected: False) ---
+    # mismatched types
+    print(hw2.is_valid_parenthesis("(]"), "Expected: False")
+    # incorrectly interleaved
+    print(hw2.is_valid_parenthesis("([)]"), "Expected: False")
+    # missing closing brace
+    print(hw2.is_valid_parenthesis("{[]"), "Expected: False")
+    # closer before opener
+    print(hw2.is_valid_parenthesis(")("), "Expected: False")
+    # extra closer in middle
+    print(hw2.is_valid_parenthesis("())(()"), "Expected: False")
