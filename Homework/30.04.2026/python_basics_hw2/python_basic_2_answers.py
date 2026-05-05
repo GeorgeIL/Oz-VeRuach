@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from python_basics.helper import all_instance_checker
+from classes.Stack import Stack
 
 # numpy import
 import numpy as np
@@ -200,9 +201,11 @@ Question 14)
 
 
 def recursive_power(a: int, b: int):
+
+    # Make sure only int types are sent
     all_instance_checker(a, b, type_check=int)
 
-    if b == 0: # Will always be 1
+    if b == 0:  # Will always be 1
         return 1
 
     if b < 0:
@@ -218,3 +221,60 @@ def _recursive_internal(a, b, res=1):
 
     # Recursive call
     return _recursive_internal(a, b - 1, res=res * a)
+
+
+"""
+Question 15)
+1. Create function to determine if parenthesis are valid
+    * Function gets a string value
+    * Function returns boolean value
+    * Using a Stack class
+"""
+
+
+def is_valid_parenthesis(string_sent: str):
+
+    openers = ("(", "[", "{")
+    closers = (")", "]", "}")
+
+    # Make sure only str types are sent
+    all_instance_checker(string_sent, type_check=str)
+
+    # Strip the string from irrelevant values using the function below
+    clean_str = keep_only_chars(string_sent, *openers, *closers)
+
+    stk = Stack()
+    # Call the parenthesis checker
+    result = parenthesis_checker(clean_str, stk, openers, closers)
+
+    # If checker found a mismatch, return False immediately
+    if not result:
+        return False
+
+    # Valid only if the stack is empty (all openers were matched)
+    return stk.is_empty()
+
+
+def keep_only_chars(string_sent, *chars_to_keep):
+    return "".join(c for c in string_sent if c in chars_to_keep)
+
+
+def parenthesis_checker(clean_str: str, stk: Stack, openers, closers):
+
+    # Build a dict from each closer to its matching opener
+    match = {closers[i]: openers[i] for i in range(len(openers))}
+
+    for char in clean_str:
+        if char in openers:
+            # Push opener onto the stack
+            stk.push(char)
+        elif char in closers:
+            # A closer with nothing to match against is invalid
+            if stk.is_empty():
+                return False
+            # Top of stack must be the matching opener
+            if stk.peek() != match[char]:
+                return False
+            stk.pop()
+
+    return True
