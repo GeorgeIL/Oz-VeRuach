@@ -1,4 +1,6 @@
 # Ignore the .venv file 
 .venv/
 
+.DS_Store
+
 __pycache__/
