@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from python_basics.helper import all_instance_checker
 
 # numpy import
-import numpy as np 
+import numpy as np
 
 """
 Question 5)
@@ -147,7 +147,74 @@ def count_upper_lower(string_sent: str):
 
 """
 Question 11)
-1. Create a Python function to count upper and lower cases in string
-    * Function receives a string
-    * Will return a dictionary with the values
+1. Create a 1D numpy array without any loops
 """
+
+
+def question_11():
+    arr = np.arange(10)
+    return arr
+
+
+"""
+Question 12)
+1. Create a 1D numpy array with number values
+    * Extract all odd numbers into a new numpy array
+    * No loops allowed
+"""
+
+
+def make_odd_array(n: int):
+    # Check n first
+    all_instance_checker(n, type_check=int)
+
+    arr = np.arange(n)
+
+    odd_arr = arr[arr % 2 != 0]
+    return odd_arr
+
+
+"""
+Question 13)
+1. Create a numpy eye array 5x5
+    * All values > 0 => -1
+    * No loops allowed
+"""
+
+
+def question_13():
+
+    arr = np.eye(5)
+    print(f"\nBefore\n{arr}")
+    arr[arr > 0] = -1
+    print(f"\nAfter\n{arr}")
+
+
+"""
+Question 14)
+1. Create recursive function to calculate a^b
+    * Function will work with whole numbers only
+    * Function will allow negative numbers
+    * No loops allowed
+"""
+
+
+def recursive_power(a: int, b: int):
+    all_instance_checker(a, b, type_check=int)
+
+    if b == 0: # Will always be 1
+        return 1
+
+    if b < 0:
+        return 1 / _recursive_internal(a, -b)
+
+    return _recursive_internal(a, b)
+
+
+def _recursive_internal(a, b, res=1):
+    # Stop con
+    if b <= 0:
+        return res
+
+    # Recursive call
+    return _recursive_internal(a, b - 1, res=res * a)

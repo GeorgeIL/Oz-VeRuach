@@ -76,8 +76,41 @@ if __name__ == "__main__":
 
     """Question 10"""
 
-    # Tests
-    # Valid input
-    print(hw2.count_upper_lower("Hello World!"))
+    # # Tests
+    # # Valid input
+    # print(hw2.count_upper_lower("Hello World!"))
     # # Invalid input
     # print(hw2.count_upper_lower([1, 2, 3, 4, 5]))
+
+    """Question 11"""
+
+    # # Calling the function
+    # print(hw2.question_11())
+
+    """Question 12"""
+
+    # # Calling the function
+    # print(hw2.make_odd_array(22))
+    # # Invalid input
+    # print(hw2.make_odd_array("22"))
+
+    """Question 13"""
+
+    # # Calling the function
+    # hw2.question_13()
+
+    """Question 14"""
+
+    # # Tests
+    # # Check via default python operator
+    # print(3**4)
+    # print(3**-4)
+    # print((-2) ** 4)
+    # print((-4) ** -4, "\n")
+    # # Valid input
+    # print(hw2.recursive_power(3, 4))
+    # print(hw2.recursive_power(3, -4))
+    # print(hw2.recursive_power(-2, 4))
+    # print(hw2.recursive_power(-4, -4))
+    # # Invalid input
+    # print(hw2.recursive_power("-4", -4))
