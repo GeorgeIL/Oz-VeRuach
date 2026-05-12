@@ -1,7 +1,10 @@
 import pathlib
 
 # External imports
-from simple_term_menu import TerminalMenu
+try:
+    from simple_term_menu import TerminalMenu
+except (ImportError, NotImplementedError):
+    TerminalMenu = None
 import pandas as pd
 from colorama import Fore
 from pyfiglet import Figlet
@@ -10,6 +13,27 @@ from tabulate import tabulate
 # Internal imports
 from Passenger import Passenger
 import functions as f
+
+
+def choose_menu_option(options):
+    if TerminalMenu is not None:
+        terminal_menu = TerminalMenu(options)
+        choice_index = terminal_menu.show()
+        if choice_index is None:
+            return options[-1]
+        return options[choice_index]
+
+    print("Choose an option:")
+    for index, option in enumerate(options, start=1):
+        print(f"{index}. {option}")
+
+    while True:
+        selection = input("Enter option number: ").strip()
+        if selection.isdigit():
+            choice_number = int(selection)
+            if 1 <= choice_number <= len(options):
+                return options[choice_number - 1]
+        print(Fore.RED + "Invalid menu option. Please try again." + Fore.RESET)
 
 
 def main():
@@ -43,10 +67,7 @@ def main():
     options = ["Add Passenger", "Show Recent Passengers", "Show All Passengers", "Exit"]
 
     while True:
-        terminal_menu = TerminalMenu(options)
-        choice_index = terminal_menu.show()
-
-        choice = options[choice_index]
+        choice = choose_menu_option(options)
 
         if choice == options[0]:  # "Add Passenger"
             # Get all of the details from the user and store them in variables
