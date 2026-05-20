@@ -2,15 +2,17 @@
 
 ## Description
 
-This delicious, hearty chicken noodle soup is perfect for cold season. It's easy to make, filling, good for sore throats, and can easily be doubled to serve a big family.
+This is a delicious, hearty chicken noodle soup, perfect for cold season and sore throats. It's an easy-to-make, filling, and salty dish.
 
-**Tags:** chicken, soup, noodle, hearty, comfort food
+**Tags:** chicken, soup, noodle, comfort food, winter
 
 ## Ingredients
 
 - 3 large chicken breasts, cut into 2 to 3 inch pieces, seasoned generously with salt and pepper
 - 2 tablespoons EVOO
-- Standard Mire Poix — chop ½ half medium onion, 2 stalks of celery, and 2 large carrots
+- ½ medium onion
+- 2 stalks of celery
+- 2 large carrots
 - 1 large clove garlic, minced
 - 1 teaspoon dried thyme
 - 2 bay leaves
@@ -32,4 +34,4 @@ This delicious, hearty chicken noodle soup is perfect for cold season. It's easy
 
 ## Notes
 
-This recipe can be easily doubled to serve a big family. Serve with crusty French bread.
+You can easily double the recipe to serve a big family. Serve with crusty French bread.
