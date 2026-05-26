@@ -3,4 +3,20 @@
 
 .DS_Store
 
+secret.json
+.env
+
+# Python-generated files
 __pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# node_modules
+node_modules/
+
+# Virtual environments
+.venv
+.env

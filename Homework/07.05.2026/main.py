@@ -39,6 +39,58 @@ def choose_menu_option(options):
 def main():
 
     base_dir = pathlib.Path(__file__).resolve().parent
+    titanic = pd.read_csv(base_dir / "titanic.csv")
+
+    # female_c = titanic[titanic["sex"] == "female"].shape[0]
+    # male_c = titanic[titanic["sex"] == "male"].shape[0]
+    # all_c = titanic.shape[0]
+    # print(female_c, male_c, all_c)
+
+    # above_18 = titanic[titanic["age"] >= 18].shape[0]
+    # below_18 = titanic[titanic["age"] < 18].shape[0]
+
+    # print(above_18, below_18)
+
+    # surv_female = titanic[titanic["sex"] == "female"][titanic["survived"] == 1].shape[0]
+    # surv_male = titanic[titanic["sex"] == "male"][titanic["survived"] == 1].shape[0]
+    # print(surv_female, surv_male)
+
+    # per_minor_surv = titanic[titanic["age"] < 18][titanic["survived"] == 1].shape[0]
+    # percent = per_minor_surv / all_c * 100
+    # print(per_minor_surv, percent)
+
+    # print(titanic.count(titanic["age"] < 18))
+
+    input()
+
+    # Remove to start the program
+    # X
+    # X
+    # X
+    # X
+    # X
+
+    # [X] Sub set of the data using the loc function
+    # This is done if we want to work with a smaller data set in order to more effectively work on the data
+    titanic_sub = titanic.loc[titanic["sex"] == "female", ["name", "age", "fare"]]
+
+    # [X] Multiple filters
+    titanic_sub = titanic.loc[
+        (titanic["sex"] == "female") & (titanic["age"] >= 18), ["name"]
+    ]
+
+    print(len(titanic_sub))
+    # X
+    # X
+    # X
+    # X
+    # X
+    # X
+    input()
+
+    ## ---------- MAIN PROGRAM STARTS HERE ---------
+
+    base_dir = pathlib.Path(__file__).resolve().parent
 
     # Get the titanic data set from the script directory
     titanic = pd.read_csv(base_dir / "titanic.csv")

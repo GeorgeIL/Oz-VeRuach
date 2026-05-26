@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Secrets - never bake the .env file into the image;
+# pass secrets via docker run -e or docker-compose env_file
+.env
+
+# Git
+.git/
+.gitignore
+
+# Editor / OS
+.DS_Store
+*.swp
+.vscode/
+
+# Test / notebook artefacts
+*.ipynb
