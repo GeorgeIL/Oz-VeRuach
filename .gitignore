@@ -5,6 +5,7 @@
 
 secret.json
 .env
+env.ec2
 
 # Python-generated files
 __pycache__/
