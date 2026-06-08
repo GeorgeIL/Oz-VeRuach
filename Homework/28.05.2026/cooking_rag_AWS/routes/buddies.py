@@ -99,7 +99,7 @@ def list_share_recipes():
     except ValueError:
         return jsonify({"error": "Invalid pagination parameters"}), 400
 
-    recipes, total = s3_recipes.search_recipes(conn, query, limit, offset)
+    _, recipes, total = s3_recipes.search_recipes(conn, query, limit, offset)
     return jsonify({"recipes": recipes, "total": total})
 
 

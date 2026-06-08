@@ -169,18 +169,6 @@ def list_recipes():
         page = 1
 
     offset = (page - 1) * PAGE_SIZE
-    items, total = s3_recipes.search_recipes(
-        conn, query, PAGE_SIZE, offset, sort=sort
-    )
-    total_pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
-    if page > total_pages:
-        page = total_pages
-        offset = (page - 1) * PAGE_SIZE
-        items, total = s3_recipes.search_recipes(
-            conn, query, PAGE_SIZE, offset, sort=sort
-        )
-
-    recipes = [_row_to_recipe(item) for item in items]
 
     with conn.cursor() as cur:
         cur.execute(
@@ -188,9 +176,35 @@ def list_recipes():
         )
         favorites = {r["recipe_slug"] for r in cur.fetchall()}
 
+    fav_items, other_items, total_others = s3_recipes.search_recipes(
+        conn,
+        query,
+        PAGE_SIZE,
+        offset,
+        sort=sort,
+        favorite_slugs=favorites,
+    )
+    total_pages = max((total_others + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    if page > total_pages:
+        page = total_pages
+        offset = (page - 1) * PAGE_SIZE
+        fav_items, other_items, total_others = s3_recipes.search_recipes(
+            conn,
+            query,
+            PAGE_SIZE,
+            offset,
+            sort=sort,
+            favorite_slugs=favorites,
+        )
+
+    favorite_recipes = [_row_to_recipe(item) for item in fav_items]
+    recipes = [_row_to_recipe(item) for item in other_items]
+    total = len(fav_items) + total_others
+
     return render_template(
         "recipes/list.html",
         recipes=recipes,
+        favorite_recipes=favorite_recipes,
         favorites=favorites,
         current_sort=sort,
         current_query=query,
@@ -549,6 +563,7 @@ def edit_recipe_image(slug):
         title=_recipe_title(conn, slug),
         image_url=image_state["image_url"],
         image_status=image_state["status"],
+        gemini_enabled=bool(Config.GEMINI_API_KEY),
     )
 
 
@@ -611,6 +626,30 @@ def upload_recipe_image(slug):
         return jsonify({"error": "Upload failed"}), 500
 
     return jsonify({"message": "Image uploaded", "image_url": url})
+
+
+@recipes_bp.route("/<slug>/image/generate", methods=["POST"])
+@login_required
+def generate_recipe_image(slug):
+    conn = get_db()
+    if not _recipe_exists(conn, slug):
+        return jsonify({"error": "Recipe not found"}), 404
+
+    if not Config.GEMINI_API_KEY:
+        return jsonify({"error": "Image generation is not configured"}), 503
+
+    data = request.get_json(silent=True) or {}
+    instructions = (data.get("instructions") or "").strip()
+    if len(instructions) > 500:
+        return jsonify({"error": "Instructions are too long (max 500 characters)"}), 400
+
+    title = _recipe_title(conn, slug)
+    try:
+        recipe_images.trigger_manual_generation(conn, slug, title, instructions)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+    return jsonify({"message": "Generation started", "status": "pending"}), 202
 
 
 @recipes_bp.route("/<slug>/image", methods=["DELETE"])

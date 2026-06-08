@@ -222,7 +222,7 @@ def upload_image_bytes(slug: str, data: bytes, content_type: str, ext: str) -> t
     return key, public_url(key)
 
 
-def generate_image(title: str) -> tuple[bytes, str, str]:
+def generate_image(title: str, instructions: str = "") -> tuple[bytes, str, str]:
     """Return (image_bytes, content_type, file_extension)."""
     if not Config.GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not configured")
@@ -233,6 +233,9 @@ def generate_image(title: str) -> tuple[bytes, str, str]:
         "Natural lighting, appetizing presentation on a simple plate or bowl, "
         "shallow depth of field, no text, no watermarks, no people."
     )
+    extra = (instructions or "").strip()
+    if extra:
+        prompt = f"{prompt} Additional styling notes from the cook: {extra}"
     response = client.models.generate_content(
         model=Config.GEMINI_MODEL,
         contents=[prompt],
@@ -248,10 +251,10 @@ def generate_image(title: str) -> tuple[bytes, str, str]:
     raise RuntimeError("Gemini returned no image data")
 
 
-def _run_generation(slug: str, title: str) -> None:
+def _run_generation(slug: str, title: str, instructions: str = "") -> None:
     conn = _checkout()
     try:
-        image_bytes, content_type, ext = generate_image(title)
+        image_bytes, content_type, ext = generate_image(title, instructions)
         s3_key, url = upload_image_bytes(slug, image_bytes, content_type, ext)
         save_image(conn, slug, url, s3_key, "ready")
         s3_recipes.invalidate_index_cache()
@@ -266,14 +269,14 @@ def _run_generation(slug: str, title: str) -> None:
         _get_pool().putconn(conn)
 
 
-def schedule_generation(slug: str, title: str) -> None:
+def schedule_generation(slug: str, title: str, instructions: str = "") -> None:
     if not Config.GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY not set — skipping image generation for %s", slug)
         return
 
     thread = threading.Thread(
         target=_run_generation,
-        args=(slug, title),
+        args=(slug, title, instructions),
         daemon=True,
         name=f"recipe-image-{slug}",
     )
@@ -286,6 +289,20 @@ def trigger_generation_after_create(conn, slug: str, title: str) -> None:
         return
     set_pending(conn, slug)
     schedule_generation(slug, title)
+
+
+def trigger_manual_generation(
+    conn, slug: str, title: str, instructions: str = ""
+) -> None:
+    if not Config.GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+
+    row = _load_image_row(conn, slug)
+    if row and row.get("image_s3_key"):
+        _delete_s3_key(row["image_s3_key"])
+
+    set_pending(conn, slug)
+    schedule_generation(slug, title, instructions.strip())
 
 
 def set_external_url(conn, slug: str, url: str) -> None:

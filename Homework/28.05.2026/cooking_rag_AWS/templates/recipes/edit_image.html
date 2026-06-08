@@ -15,7 +15,7 @@
 <div class="alert" id="imageAlert" style="display: none"></div>
 
 <section class="form-section image-manage-section">
-  <div class="image-manage-preview">
+  <div class="image-manage-preview" id="imageManagePreview">
     {% if image_url %}
     <img
       id="imagePreview"
@@ -34,6 +34,13 @@
   <p id="imageStatusLine" class="image-status-line{% if image_status != 'pending' %} hidden{% endif %}">
     AI is composing your recipe photo — it will appear here automatically.
   </p>
+
+  {% if gemini_enabled %}
+  <div class="form-group">
+    <button type="button" class="btn-primary" id="generateImageBtn">✨ Generate image</button>
+    <p class="form-hint">Create a new AI food photo with optional styling notes.</p>
+  </div>
+  {% endif %}
 
   <div class="form-group">
     <label for="imageUrlInput">Image URL</label>
@@ -62,10 +69,34 @@
     <a href="{{ url_for('recipes.view_recipe', slug=slug) }}" class="btn-secondary">Done</a>
   </div>
 </section>
+
+{% if gemini_enabled %}
+<div id="generateImageModal" class="image-modal hidden" aria-hidden="true">
+  <div class="image-modal__backdrop" id="generateModalBackdrop"></div>
+  <div class="image-modal__panel" role="dialog" aria-modal="true" aria-labelledby="generateModalTitle">
+    <h2 id="generateModalTitle" class="image-modal__title">Generate recipe photo</h2>
+    <p class="image-modal__text">
+      Add optional styling notes and the AI will incorporate your touch into the picture.
+    </p>
+    <label class="image-modal__label" for="generateInstructions">Additional instructions (optional)</label>
+    <textarea
+      id="generateInstructions"
+      class="image-modal__input"
+      rows="4"
+      maxlength="500"
+      placeholder="e.g. rustic wooden table, warm evening light, sprinkle of powdered sugar…"
+    ></textarea>
+    <div class="image-modal__actions">
+      <button type="button" class="btn-secondary" id="cancelGenerateBtn">Cancel</button>
+      <button type="button" class="btn-primary" id="confirmGenerateBtn">Generate picture</button>
+    </div>
+  </div>
+</div>
+{% endif %}
 {% endblock %}
 {% block extra_js %}
 <script src="{{ url_for('static', filename='js/recipes.js') }}"></script>
 <script>
-  initRecipeImageManager("{{ slug }}");
+  initRecipeImageManager("{{ slug }}", {{ title | tojson }});
 </script>
 {% endblock %}

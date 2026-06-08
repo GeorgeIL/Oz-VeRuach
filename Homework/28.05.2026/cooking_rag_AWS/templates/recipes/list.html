@@ -41,13 +41,13 @@
     type="search"
     name="q"
     value="{{ current_query }}"
-    placeholder="Search by name or tag…"
+    placeholder="Search by name or tag… (#dessert, bread for tags only)"
     autocomplete="off"
   />
   <button type="submit" class="btn-secondary">Search</button>
 </form>
 
-{% if not recipes %}
+{% if not recipes and not (favorite_recipes if not select_mode else []) %}
 <div class="empty-state">
   <div class="empty-emoji">📝</div>
   <h2>{% if current_query %}No matching recipes{% else %}No recipes yet{% endif %}</h2>
@@ -78,8 +78,8 @@
 </div>
 
 {% if not select_mode %}
-{% set fav_recipes   = recipes | selectattr('slug', 'in', favorites) | list %}
-{% set other_recipes = recipes | rejectattr('slug', 'in', favorites) | list %}
+{% set fav_recipes = favorite_recipes %}
+{% set other_recipes = recipes %}
 
 {% if fav_recipes %}
 <section class="recipes-section">

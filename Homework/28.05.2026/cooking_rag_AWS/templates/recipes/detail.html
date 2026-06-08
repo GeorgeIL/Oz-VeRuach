@@ -20,13 +20,15 @@ endblock %} {% block extra_css %}
     >
       📧 Share with buddies
     </a>
+    {% if not recipe.image_url and recipe.image_status != 'pending' %}
     <a
       href="{{ url_for('recipes.edit_recipe_image', slug=recipe.slug) }}"
       class="btn-secondary"
-      title="Change or remove this recipe photo"
+      title="Add or manage this recipe photo"
     >
       🖼 Manage image
     </a>
+    {% endif %}
     {% if is_author %}
     <a
       href="{{ url_for('recipes.edit_recipe', slug=recipe.slug) }}"
@@ -50,12 +52,18 @@ endblock %} {% block extra_css %}
 
 {% if recipe.image_url %}
 <div class="recipe-detail-image-wrap">
-  <img
-    class="recipe-detail-image"
-    src="{{ recipe.image_url }}"
-    alt="{{ recipe.title }}"
-    loading="lazy"
-  />
+  <a
+    href="{{ url_for('recipes.edit_recipe_image', slug=recipe.slug) }}"
+    class="recipe-detail-image-link"
+    title="Manage recipe photo"
+  >
+    <img
+      class="recipe-detail-image"
+      src="{{ recipe.image_url }}"
+      alt="{{ recipe.title }}"
+      loading="lazy"
+    />
+  </a>
 </div>
 {% elif recipe.image_status == 'pending' %}
 <div

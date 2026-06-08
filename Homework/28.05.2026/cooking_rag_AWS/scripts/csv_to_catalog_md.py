@@ -241,6 +241,10 @@ def _build_notes(row: pd.Series, rating_col: str | None, extra_cols: dict[str, s
     return "\n".join(notes)
 
 
+def _normalize_title(title: str) -> str:
+    return re.sub(r"\s+", " ", str(title).strip().lower())
+
+
 def _unique_slug(base_slug: str, used: set[str]) -> str:
     slug = base_slug
     counter = 1
@@ -319,7 +323,18 @@ def main() -> None:
     parser.add_argument(
         "--half",
         action="store_true",
-        help="Use every other CSV row (keep indices 0,2,4…; skip 1,3,5…) and save data/recipes_half.csv",
+        help="Use every other CSV row (even indices 0,2,4…) and save data/recipes_half.csv",
+    )
+    parser.add_argument(
+        "--half-parity",
+        choices=("even", "odd"),
+        default="even",
+        help="With --half: even keeps rows 0,2,4…; odd keeps rows 1,3,5… (default: even)",
+    )
+    parser.add_argument(
+        "--allow-duplicate-names",
+        action="store_true",
+        help="Upload duplicate recipe names (by default, only the first occurrence is kept)",
     )
     parser.add_argument(
         "--csv",
@@ -341,10 +356,16 @@ def main() -> None:
 
     df = pd.read_csv(csv_path)
     if args.half:
-        df = df.iloc[::2].copy()
+        if args.half_parity == "odd":
+            df = df.iloc[1::2].copy()
+        else:
+            df = df.iloc[::2].copy()
         half_path = csv_path.parent / "recipes_half.csv"
         df.to_csv(half_path, index=False)
-        print(f"Half dataset: {len(df)} rows (saved to {half_path})")
+        print(
+            f"Half dataset ({args.half_parity} indices): {len(df)} rows "
+            f"(saved to {half_path})"
+        )
     if args.limit and args.limit > 0:
         df = df.head(args.limit)
 
@@ -407,13 +428,22 @@ def main() -> None:
             print(f"Removed {removed} legacy catalog object(s).")
 
     used_slugs: set[str] = set()
+    used_titles: set[str] = set()
+    skip_duplicate_names = not args.allow_duplicate_names
     manifest_entries: list[dict] = []
     uploaded = 0
+    skipped_duplicates = 0
 
     for idx, row in df.iterrows():
         title = str(row[title_col]).strip()
         if not title or title.lower() == "nan":
             continue
+
+        title_key = _normalize_title(title)
+        if skip_duplicate_names and title_key in used_titles:
+            skipped_duplicates += 1
+            continue
+        used_titles.add(title_key)
 
         description = str(row.get(description_col, "")).strip() if description_col else ""
         if description.lower() == "nan":
@@ -496,6 +526,8 @@ def main() -> None:
         )
 
     print(f"Done. Prepared {uploaded} catalog recipe file(s) under {CATALOG_PREFIX}")
+    if skip_duplicate_names and skipped_duplicates:
+        print(f"Skipped {skipped_duplicates} duplicate recipe name(s).")
     if args.dry_run:
         print("Dry run only — no files were uploaded.")
     else:

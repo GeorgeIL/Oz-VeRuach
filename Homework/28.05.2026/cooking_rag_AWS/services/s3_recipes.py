@@ -297,10 +297,44 @@ def _sort_key(item: RecipeIndexEntry, sort: str):
     return item["title"].lower()
 
 
-def _matches_query(item: RecipeIndexEntry, q: str) -> bool:
+def _parse_query(query: str) -> tuple[str, str | list[str]]:
+    """Return ('text', lowered query) or ('tags', list of tag terms)."""
+    raw = (query or "").strip()
+    if raw.startswith("#"):
+        tag_text = raw[1:].strip()
+        if not tag_text:
+            return ("text", "")
+        tags = [part.strip().lower() for part in tag_text.split(",") if part.strip()]
+        return ("tags", tags)
+    return ("text", raw.lower())
+
+
+def _matches_query(item: RecipeIndexEntry, parsed: tuple[str, str | list[str]]) -> bool:
+    mode, value = parsed
+    if mode == "tags":
+        tags = value if isinstance(value, list) else []
+        if not tags:
+            return True
+        item_tags = [str(tag).lower() for tag in item.get("tags") or []]
+        return any(
+            any(term in recipe_tag for recipe_tag in item_tags) for term in tags
+        )
+
+    q = value if isinstance(value, str) else ""
+    if not q:
+        return True
     if q in item["title"].lower() or q in item["slug"].lower():
         return True
     return any(q in str(tag).lower() for tag in item.get("tags") or [])
+
+
+def _sort_entries(
+    entries: list[RecipeIndexEntry], sort: str
+) -> list[RecipeIndexEntry]:
+    reverse = sort in ("za", "latest")
+    return sorted(
+        entries, key=lambda item: _sort_key(item, sort), reverse=reverse
+    )
 
 
 def search_recipes(
@@ -309,21 +343,36 @@ def search_recipes(
     limit: int = 50,
     offset: int = 0,
     sort: str = "az",
-) -> tuple[list[RecipeIndexEntry], int]:
-    index = build_recipe_index(conn)
-    q = (query or "").strip().lower()
+    favorite_slugs: set[str] | None = None,
+) -> tuple[list[RecipeIndexEntry], list[RecipeIndexEntry], int]:
+    """Search and sort recipes.
 
-    if q:
-        filtered = [item for item in index if _matches_query(item, q)]
+    When favorite_slugs is provided, returns (all_matching_favorites, paginated_others,
+    total_other_count). Favorites are never paginated — only non-favorite matches are.
+
+    When favorite_slugs is None, returns ([], paginated_all, total_all) for backward
+    compatibility.
+    """
+    index = build_recipe_index(conn)
+    parsed = _parse_query(query)
+
+    if parsed[0] == "tags" or (parsed[0] == "text" and parsed[1]):
+        filtered = [item for item in index if _matches_query(item, parsed)]
     else:
         filtered = list(index)
 
-    reverse = sort in ("za", "latest")
-    filtered.sort(key=lambda item: _sort_key(item, sort), reverse=reverse)
+    filtered = _sort_entries(filtered, sort)
 
-    total = len(filtered)
-    page = filtered[offset : offset + limit]
-    return page, total
+    if favorite_slugs is None:
+        total = len(filtered)
+        page = filtered[offset : offset + limit]
+        return [], page, total
+
+    favorites = [item for item in filtered if item["slug"] in favorite_slugs]
+    others = [item for item in filtered if item["slug"] not in favorite_slugs]
+    total_others = len(others)
+    page = others[offset : offset + limit]
+    return favorites, page, total_others
 
 
 def is_valid_recipe_key(s3_key: str) -> bool:
