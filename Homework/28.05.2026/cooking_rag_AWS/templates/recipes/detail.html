@@ -58,8 +58,14 @@ endblock %} {% block extra_css %}
   />
 </div>
 {% elif recipe.image_status == 'pending' %}
-<div class="recipe-detail-image-wrap">
-  <div class="image-placeholder image-placeholder--pending">Generating photo…</div>
+<div
+  class="recipe-detail-image-wrap recipe-detail-image-wrap--pending"
+  id="recipeImageWrap"
+  data-slug="{{ recipe.slug }}"
+  data-image-pending="true"
+  data-image-title="{{ recipe.title }}"
+>
+  {% include "recipes/_ai_image_loader.html" %}
 </div>
 {% endif %}
 
@@ -82,5 +88,6 @@ endblock %} {% block extra_css %}
       deleteRecipe(deleteBtn.dataset.slug),
     );
   }
+  initRecipeDetailImagePoll();
 </script>
 {% endblock %}

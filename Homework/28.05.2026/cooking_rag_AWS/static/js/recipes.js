@@ -152,6 +152,97 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;");
 }
 
+/* ── AI image loader + live status polling ──────────────────────────────────── */
+
+function aiImageLoaderHtml() {
+  return `
+    <div class="ai-image-loader" role="status" aria-live="polite" aria-label="Generating recipe photo with AI">
+      <div class="ai-image-loader__mesh" aria-hidden="true">
+        <span class="ai-image-loader__orb ai-image-loader__orb--1"></span>
+        <span class="ai-image-loader__orb ai-image-loader__orb--2"></span>
+        <span class="ai-image-loader__orb ai-image-loader__orb--3"></span>
+        <span class="ai-image-loader__orb ai-image-loader__orb--4"></span>
+      </div>
+      <div class="ai-image-loader__overlay">
+        <span class="ai-image-loader__spark" aria-hidden="true">✦</span>
+        <span class="ai-image-loader__label">Creating photo with AI</span>
+        <span class="ai-image-loader__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+      </div>
+    </div>
+  `;
+}
+
+function revealRecipeImage(container, url, alt) {
+  if (!container || !url) return;
+
+  const img = document.createElement("img");
+  img.className = "recipe-detail-image recipe-detail-image--reveal";
+  img.alt = alt || "Recipe photo";
+  img.onload = () => {
+    container.innerHTML = "";
+    container.classList.remove("recipe-detail-image-wrap--pending");
+    container.appendChild(img);
+    requestAnimationFrame(() => img.classList.add("is-visible"));
+  };
+  img.onerror = () => {
+    container.innerHTML =
+      '<div class="image-placeholder">Could not load generated image</div>';
+  };
+  img.src = url;
+}
+
+function pollRecipeImageStatus(slug, { onUpdate, interval = 3000 } = {}) {
+  let stopped = false;
+
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const resp = await fetch(
+        `/recipes/${encodeURIComponent(slug)}/image/status`,
+      );
+      const data = await resp.json();
+      if (!resp.ok) return;
+      const shouldContinue = onUpdate(data);
+      if (shouldContinue === false) {
+        stopped = true;
+        clearInterval(timer);
+      }
+    } catch {
+      /* ignore transient network errors while polling */
+    }
+  };
+
+  tick();
+  const timer = setInterval(tick, interval);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
+function initRecipeDetailImagePoll() {
+  const wrap = document.getElementById("recipeImageWrap");
+  if (!wrap || wrap.dataset.imagePending !== "true") return;
+
+  const slug = wrap.dataset.slug;
+  const title = wrap.dataset.imageTitle || "Recipe photo";
+
+  pollRecipeImageStatus(slug, {
+    interval: 3000,
+    onUpdate(data) {
+      if (data.status === "pending") return true;
+
+      if (data.image_url) {
+        revealRecipeImage(wrap, data.image_url, title);
+        wrap.dataset.imagePending = "false";
+      } else {
+        wrap.remove();
+      }
+      return false;
+    },
+  });
+}
+
 /* ── Recipe image management ─────────────────────────────────────────────────── */
 
 function initRecipeImageManager(slug) {
@@ -168,7 +259,12 @@ function initRecipeImageManager(slug) {
   function showPreview(url) {
     if (!previewEl) return;
     if (url) {
-      previewEl.outerHTML = `<img id="imagePreview" class="recipe-detail-image" src="${escapeAttr(url)}" alt="Recipe image" />`;
+      const container = previewEl.closest(".image-manage-preview") || previewEl.parentElement;
+      if (container) {
+        revealRecipeImage(container, url, "Recipe image");
+        return;
+      }
+      previewEl.outerHTML = `<img id="imagePreview" class="recipe-detail-image recipe-detail-image--reveal is-visible" src="${escapeAttr(url)}" alt="Recipe image" />`;
     } else {
       previewEl.outerHTML =
         '<div id="imagePreview" class="image-placeholder">No image</div>';
@@ -177,9 +273,8 @@ function initRecipeImageManager(slug) {
 
   function setPendingState() {
     const el = document.getElementById("imagePreview");
-    if (el && el.tagName !== "IMG") {
-      el.className = "image-placeholder image-placeholder--pending";
-      el.textContent = "Generating photo…";
+    if (el) {
+      el.innerHTML = aiImageLoaderHtml();
     }
     if (statusLine) {
       statusLine.classList.remove("hidden");
@@ -219,7 +314,7 @@ function initRecipeImageManager(slug) {
   }
 
   if (statusLine && !statusLine.classList.contains("hidden")) {
-    pollTimer = setInterval(pollStatus, 5000);
+    pollTimer = setInterval(pollStatus, 3000);
     pollStatus();
   }
 

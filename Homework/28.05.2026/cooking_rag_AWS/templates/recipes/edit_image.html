@@ -24,15 +24,15 @@
       alt="{{ title }}"
     />
     {% elif image_status == 'pending' %}
-    <div id="imagePreview" class="image-placeholder image-placeholder--pending">
-      Generating photo…
+    <div id="imagePreview">
+      {% include "recipes/_ai_image_loader.html" %}
     </div>
     {% else %}
     <div id="imagePreview" class="image-placeholder">No image</div>
     {% endif %}
   </div>
   <p id="imageStatusLine" class="image-status-line{% if image_status != 'pending' %} hidden{% endif %}">
-    Generating photo… This usually takes under a minute.
+    AI is composing your recipe photo — it will appear here automatically.
   </p>
 
   <div class="form-group">
