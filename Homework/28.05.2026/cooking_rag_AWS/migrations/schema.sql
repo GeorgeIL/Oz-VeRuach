@@ -83,3 +83,14 @@ CREATE TABLE IF NOT EXISTS cooking_buddies (
 );
 
 CREATE INDEX IF NOT EXISTS cooking_buddies_user_idx ON cooking_buddies(user_id);
+
+-- ── Recipe images (overrides, generated, uploaded) ───────────────────────────
+
+CREATE TABLE IF NOT EXISTS recipe_images (
+    slug          VARCHAR(255) PRIMARY KEY,
+    image_url     VARCHAR(1000) NOT NULL DEFAULT '',
+    image_s3_key  VARCHAR(1000) NOT NULL DEFAULT '',
+    status        VARCHAR(20)  NOT NULL DEFAULT '',
+    cleared       BOOLEAN      NOT NULL DEFAULT FALSE,
+    updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);

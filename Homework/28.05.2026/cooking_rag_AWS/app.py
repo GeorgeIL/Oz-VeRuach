@@ -23,6 +23,10 @@ if not Config.BUDDY_EMAIL_LAMBDA_NAME:
     print(
         "WARNING: BUDDY_EMAIL_LAMBDA_NAME is not set — buddy recipe emails will fail."
     )
+if not Config.GEMINI_API_KEY:
+    print(
+        "WARNING: GEMINI_API_KEY is not set — async recipe image generation is disabled."
+    )
 
 # ── Blueprints ────────────────────────────────────────────────────────────────
 app.register_blueprint(auth_bp)

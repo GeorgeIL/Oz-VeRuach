@@ -20,6 +20,13 @@ endblock %} {% block extra_css %}
     >
       📧 Share with buddies
     </a>
+    <a
+      href="{{ url_for('recipes.edit_recipe_image', slug=recipe.slug) }}"
+      class="btn-secondary"
+      title="Change or remove this recipe photo"
+    >
+      🖼 Manage image
+    </a>
     {% if is_author %}
     <a
       href="{{ url_for('recipes.edit_recipe', slug=recipe.slug) }}"
@@ -49,6 +56,10 @@ endblock %} {% block extra_css %}
     alt="{{ recipe.title }}"
     loading="lazy"
   />
+</div>
+{% elif recipe.image_status == 'pending' %}
+<div class="recipe-detail-image-wrap">
+  <div class="image-placeholder image-placeholder--pending">Generating photo…</div>
 </div>
 {% endif %}
 

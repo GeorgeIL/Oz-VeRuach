@@ -127,6 +127,69 @@
   object-fit: cover;
   display: block;
 }
+.image-placeholder {
+  width: 100%;
+  height: 100%;
+  min-height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  background: var(--bg);
+}
+.image-placeholder--pending {
+  color: var(--primary);
+  font-style: italic;
+}
+.image-manage-section {
+  max-width: 520px;
+}
+.image-manage-preview {
+  width: 100%;
+  max-width: 420px;
+  height: 220px;
+  margin-bottom: 1rem;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.image-manage-preview .recipe-detail-image,
+.image-manage-preview .image-placeholder {
+  width: 100%;
+  height: 100%;
+  min-height: 220px;
+}
+.image-url-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.image-url-row input[type="url"],
+.image-url-row input[type="file"] {
+  flex: 1;
+  min-width: 180px;
+}
+.image-status-line {
+  font-size: 0.875rem;
+  color: var(--primary);
+  margin: -0.5rem 0 1rem;
+  font-style: italic;
+}
+.image-status-line.hidden {
+  display: none;
+}
+.form-hint {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.35rem;
+}
+.page-subtitle {
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
 
 /* Markdown rendered recipe body */
 .recipe-content {

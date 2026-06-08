@@ -2,9 +2,10 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
-
 BASE_DIR = Path(__file__).resolve().parent
+
+# Load project .env explicitly (find_dotenv() can miss it depending on cwd).
+load_dotenv(BASE_DIR / ".env")
 
 
 class Config:
@@ -49,3 +50,7 @@ class Config:
         "BUDDY_EMAIL_LAMBDA_NAME", "cooking-rag-buddy-email"
     )
     SES_FROM_EMAIL = os.getenv("SES_FROM_EMAIL", "")
+
+    # Gemini image generation
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-image")

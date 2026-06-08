@@ -21,7 +21,7 @@ from auth_utils import get_current_user, login_required
 from config import Config
 from db import get_db
 from rag import engine as rag
-from services import s3_recipes
+from services import recipe_images, s3_recipes
 
 recipes_bp = Blueprint("recipes", __name__, url_prefix="/recipes")
 PAGE_SIZE = 20
@@ -104,6 +104,46 @@ def _row_to_recipe(row) -> dict:
     r = dict(row)
     r["_id"] = r.get("id", "")  # template compat
     return r
+
+
+def _recipe_exists(conn, slug: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM recipes WHERE slug = %s", (slug,))
+        if cur.fetchone():
+            return True
+    try:
+        s3_recipes.get_recipe_content(s3_recipes.catalog_s3_key(slug))
+        return True
+    except Exception:
+        return False
+
+
+def _recipe_title(conn, slug: str) -> str:
+    with conn.cursor() as cur:
+        cur.execute("SELECT title FROM recipes WHERE slug = %s", (slug,))
+        row = cur.fetchone()
+    if row:
+        return row["title"]
+    manifest = s3_recipes._load_catalog_manifest()
+    item = manifest.get(slug, {})
+    if item.get("title"):
+        return item["title"]
+    try:
+        md = s3_recipes.get_recipe_content(s3_recipes.catalog_s3_key(slug))
+        title = s3_recipes.parse_title(md)
+        if title:
+            return title
+    except Exception:
+        pass
+    return slug.replace("-", " ").title()
+
+
+_IMAGE_UPLOAD_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -216,6 +256,7 @@ def create_recipe():
     conn.commit()
     s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
+    recipe_images.trigger_generation_after_create(conn, slug, title)
 
     return (
         jsonify(
@@ -243,7 +284,9 @@ def view_recipe(slug):
 
     if recipe:
         recipe = _row_to_recipe(recipe)
-        recipe["image_url"] = s3_recipes.get_image_url(slug)
+        image_state = s3_recipes.get_image_state(slug, conn)
+        recipe["image_url"] = image_state["image_url"]
+        recipe["image_status"] = image_state["status"]
         md_content = _recipe_to_md(
             recipe["title"],
             recipe["description"],
@@ -270,7 +313,8 @@ def view_recipe(slug):
 
     title = s3_recipes.title_for_key(catalog_key, md_content)
     tags = s3_recipes.parse_tags(md_content)
-    image_url = s3_recipes.get_image_url(slug)
+    image_state = s3_recipes.get_image_state(slug, conn)
+    image_url = image_state["image_url"]
     html_content = _render_md(md_content)
     recipe = {
         "id": "",
@@ -279,6 +323,7 @@ def view_recipe(slug):
         "description": "",
         "tags": tags,
         "image_url": image_url,
+        "image_status": image_state["status"],
         "author_username": None,
         "author_id": None,
         "created_at": None,
@@ -372,6 +417,7 @@ def delete_recipe(slug):
         return jsonify({"error": "Recipe not found"}), 404
 
     _delete_from_s3(recipe["s3_key"])
+    recipe_images.cleanup_on_recipe_delete(conn, slug)
     with conn.cursor() as cur:
         cur.execute("DELETE FROM recipes WHERE slug = %s", (slug,))
     conn.commit()
@@ -445,6 +491,7 @@ def recipe_from_chat():
     conn.commit()
     s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
+    recipe_images.trigger_generation_after_create(conn, slug, title)
 
     return (
         jsonify(
@@ -483,6 +530,98 @@ def toggle_favorite(slug):
         )
     conn.commit()
     return jsonify({"favorited": True})
+
+
+# ── Recipe image management ───────────────────────────────────────────────────
+
+
+@recipes_bp.route("/<slug>/edit-image")
+@login_required
+def edit_recipe_image(slug):
+    conn = get_db()
+    if not _recipe_exists(conn, slug):
+        abort(404)
+
+    image_state = s3_recipes.get_image_state(slug, conn)
+    return render_template(
+        "recipes/edit_image.html",
+        slug=slug,
+        title=_recipe_title(conn, slug),
+        image_url=image_state["image_url"],
+        image_status=image_state["status"],
+    )
+
+
+@recipes_bp.route("/<slug>/image/status")
+@login_required
+def recipe_image_status(slug):
+    conn = get_db()
+    if not _recipe_exists(conn, slug):
+        return jsonify({"error": "Recipe not found"}), 404
+
+    state = s3_recipes.get_image_state(slug, conn)
+    return jsonify({"status": state["status"], "image_url": state["image_url"]})
+
+
+@recipes_bp.route("/<slug>/image", methods=["PUT"])
+@login_required
+def set_recipe_image_url(slug):
+    conn = get_db()
+    if not _recipe_exists(conn, slug):
+        return jsonify({"error": "Recipe not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    url = recipe_images.validate_image_url(data.get("image_url") or "")
+    if not url:
+        return jsonify({"error": "A valid http(s) image URL is required"}), 400
+
+    recipe_images.set_external_url(conn, slug, url)
+    return jsonify({"message": "Image updated", "image_url": url})
+
+
+@recipes_bp.route("/<slug>/image/upload", methods=["POST"])
+@login_required
+def upload_recipe_image(slug):
+    conn = get_db()
+    if not _recipe_exists(conn, slug):
+        return jsonify({"error": "Recipe not found"}), 404
+
+    if "file" not in request.files or not request.files["file"].filename:
+        return jsonify({"error": "Please select an image file"}), 400
+
+    file = request.files["file"]
+    filename = secure_filename(file.filename)
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content_type = _IMAGE_UPLOAD_TYPES.get(ext)
+    if not content_type:
+        return jsonify({"error": "Only JPG, PNG, and WebP images are supported"}), 400
+
+    file_bytes = file.read()
+    try:
+        url = recipe_images.upload_user_image(
+            conn,
+            slug,
+            file_bytes,
+            content_type,
+            ext.lstrip("."),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        return jsonify({"error": "Upload failed"}), 500
+
+    return jsonify({"message": "Image uploaded", "image_url": url})
+
+
+@recipes_bp.route("/<slug>/image", methods=["DELETE"])
+@login_required
+def remove_recipe_image(slug):
+    conn = get_db()
+    if not _recipe_exists(conn, slug):
+        return jsonify({"error": "Recipe not found"}), 404
+
+    recipe_images.clear_image(conn, slug)
+    return jsonify({"message": "Image removed"})
 
 
 # ── Upload recipe from PDF / TXT ─────────────────────────────────────────────
@@ -593,5 +732,6 @@ def upload_recipe():
     conn.commit()
     s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
+    recipe_images.trigger_generation_after_create(conn, slug, title)
 
     return redirect(url_for("recipes.view_recipe", slug=slug))

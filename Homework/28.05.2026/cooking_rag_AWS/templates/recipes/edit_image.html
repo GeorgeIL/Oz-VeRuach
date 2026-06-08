@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Manage Image — {{ title }} — Smart Cookbook{% endblock %}
+{% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/recipes.css') }}" />
+{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <a href="{{ url_for('recipes.view_recipe', slug=slug) }}" class="back-link">← {{ title }}</a>
+    <h1>🖼 Manage Recipe Image</h1>
+    <p class="page-subtitle">{{ title }}</p>
+  </div>
+</div>
+
+<div class="alert" id="imageAlert" style="display: none"></div>
+
+<section class="form-section image-manage-section">
+  <div class="image-manage-preview">
+    {% if image_url %}
+    <img
+      id="imagePreview"
+      class="recipe-detail-image"
+      src="{{ image_url }}"
+      alt="{{ title }}"
+    />
+    {% elif image_status == 'pending' %}
+    <div id="imagePreview" class="image-placeholder image-placeholder--pending">
+      Generating photo…
+    </div>
+    {% else %}
+    <div id="imagePreview" class="image-placeholder">No image</div>
+    {% endif %}
+  </div>
+  <p id="imageStatusLine" class="image-status-line{% if image_status != 'pending' %} hidden{% endif %}">
+    Generating photo… This usually takes under a minute.
+  </p>
+
+  <div class="form-group">
+    <label for="imageUrlInput">Image URL</label>
+    <div class="image-url-row">
+      <input
+        type="url"
+        id="imageUrlInput"
+        placeholder="https://example.com/photo.jpg"
+        value="{{ image_url or '' }}"
+      />
+      <button type="button" class="btn-secondary" id="setUrlBtn">Set from URL</button>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label for="imageFileInput">Upload image</label>
+    <div class="image-url-row">
+      <input type="file" id="imageFileInput" accept="image/png,image/jpeg,image/webp" />
+      <button type="button" class="btn-secondary" id="uploadBtn">Upload image</button>
+    </div>
+    <p class="form-hint">JPG, PNG, or WebP — max 5 MB</p>
+  </div>
+
+  <div class="form-actions">
+    <button type="button" class="btn-danger" id="removeImageBtn">Remove image</button>
+    <a href="{{ url_for('recipes.view_recipe', slug=slug) }}" class="btn-secondary">Done</a>
+  </div>
+</section>
+{% endblock %}
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/recipes.js') }}"></script>
+<script>
+  initRecipeImageManager("{{ slug }}");
+</script>
+{% endblock %}

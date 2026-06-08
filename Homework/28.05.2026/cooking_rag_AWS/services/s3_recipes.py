@@ -33,6 +33,7 @@ class RecipeIndexEntry(TypedDict):
     description: str
     tags: list
     image_url: str | None
+    image_status: str
     author_username: str | None
     created_at: datetime | None
     last_modified: datetime | None
@@ -134,10 +135,16 @@ def _load_catalog_manifest() -> dict[str, dict]:
     return lookup
 
 
-def get_image_url(slug: str) -> str | None:
-    manifest = _load_catalog_manifest()
-    item = manifest.get(slug, {})
-    return item.get("image_url")
+def get_image_url(slug: str, conn) -> str | None:
+    from services import recipe_images
+
+    return recipe_images.resolve_image_url(slug, conn)
+
+
+def get_image_state(slug: str, conn) -> dict:
+    from services import recipe_images
+
+    return recipe_images.resolve_image_state(slug, conn)
 
 
 def _fetch_md_header(key: str) -> str:
@@ -190,6 +197,9 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
     rds_meta = _load_rds_meta(conn)
     manifest = _load_catalog_manifest()
     manifest_slugs = set(manifest.keys()) if manifest else set()
+    from services import recipe_images
+
+    image_rows = recipe_images.load_image_rows(conn)
     entries: list[RecipeIndexEntry] = []
     indexed_keys: set[str] = set()
     catalog_prefix = f"{Config.S3_RECIPES_PREFIX}{_CATALOG_PREFIX}"
@@ -216,7 +226,6 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                 or _title_from_slug(slug)
             )
             tags = rds.get("tags") or manifest_item.get("tags") or []
-            image_url = manifest_item.get("image_url")
             if not rds.get("tags") and not manifest_item.get("tags"):
                 header = _fetch_md_header(key)
                 if header:
@@ -225,6 +234,9 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                         title = parsed_title
                     tags = parse_tags(header)
 
+            image_state = recipe_images.resolve_image(
+                slug, manifest_item, image_rows.get(slug)
+            )
             source = "user" if slug in rds_meta else "catalog"
             indexed_keys.add(key)
             entries.append(
@@ -235,7 +247,8 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                     "source": source,
                     "description": rds.get("description", ""),
                     "tags": tags,
-                    "image_url": image_url,
+                    "image_url": image_state["image_url"],
+                    "image_status": image_state["status"],
                     "author_username": rds.get("author_username"),
                     "created_at": rds.get("created_at"),
                     "last_modified": obj.get("LastModified"),
@@ -246,6 +259,10 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
         s3_key = rds.get("s3_key") or catalog_s3_key(slug)
         if s3_key in indexed_keys:
             continue
+        manifest_item = manifest.get(slug, {})
+        image_state = recipe_images.resolve_image(
+            slug, manifest_item, image_rows.get(slug)
+        )
         entries.append(
             {
                 "s3_key": s3_key,
@@ -254,7 +271,8 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                 "source": "user",
                 "description": rds.get("description", ""),
                 "tags": rds.get("tags", []),
-                "image_url": None,
+                "image_url": image_state["image_url"],
+                "image_status": image_state["status"],
                 "author_username": rds.get("author_username"),
                 "created_at": rds.get("created_at"),
                 "last_modified": None,

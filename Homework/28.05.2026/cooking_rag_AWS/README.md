@@ -124,6 +124,10 @@ Use `--half --wipe-all-catalog` to rebuild with every other CSV row (~545 recipe
 save `data/recipes_half.csv`. Recipe cards show a uniform thumbnail from the CSV
 `img_src` column via `manifest.json`.
 
+User-created recipes (manual entry, PDF upload, Chef AI save) get an AI-generated
+photo in the background via **Google Gemini** (see [Recipe images](#recipe-images-gemini--s3) below).
+You can override or remove images for any recipe from the recipe detail page.
+
 This writes `recipes/catalog/{slug}.md` for every CSV row (~1100 files) using the
 **recipe name** from the CSV (not the row index), plus `recipes/catalog/manifest.json`
 for fast title/tag lookup in the app. Tags come from the CSV `cuisine_path` column.
@@ -143,6 +147,57 @@ python3 scripts/migrate_recipes_to_catalog.py
 4. Optional: `python3 scripts/generate_csv_summary.py` uploads a single
    `recipes/recipes-catalog-summary.md` with aggregate stats only. That file is
    **not** a substitute for per-recipe files when you want semantic search.
+
+#### Public read for generated/uploaded images
+
+Generated and uploaded recipe photos are stored at `recipes/catalog/images/{slug}.png`
+(or `.jpg` / `.webp`). Add a bucket policy so browsers can load them directly:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PublicReadRecipeImages",
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/recipes/catalog/images/*"
+    }
+  ]
+}
+```
+
+Replace `YOUR_BUCKET_NAME` with your bucket (e.g. `us-bucket-giora`). If the bucket
+uses **BucketOwnerEnforced** (ACLs disabled), the policy alone is enough — the app
+falls back without `ACL=public-read` on upload.
+
+### Recipe images (Gemini + S3)
+
+When a user saves a new recipe (manual form, PDF upload, or Chef AI), the app:
+
+1. Saves the recipe immediately and redirects
+2. Spawns a background thread that calls Gemini to generate a food photo
+3. Uploads the PNG to S3 and stores the public URL in Aurora (`recipe_images` table)
+
+Catalog CSV recipes keep their manifest `img_src` URLs unless you override them.
+
+**Environment variables** (add to `.env` locally and `env.ec2` on EC2 — do not commit
+the API key):
+
+```
+GEMINI_API_KEY=<your_google_ai_studio_key>
+GEMINI_MODEL=gemini-3.1-flash-image
+```
+
+If `GEMINI_API_KEY` is missing, recipes still save; no image is generated.
+
+**Managing images:** On any recipe detail page, click **Manage image** to set an external
+URL, upload a replacement, or remove the photo (with confirmation). Overrides are stored
+in RDS and take precedence over catalog manifest URLs.
+
+Apply the `recipe_images` table from `migrations/schema.sql` if upgrading an existing
+database (the `CREATE TABLE IF NOT EXISTS` block is safe to re-run).
 
 ### 3 - Amazon Bedrock Knowledge Base
 
@@ -271,6 +326,9 @@ BEDROCK_KB_DS_ID=<your_ds_id>
 # Optional: cooking buddies email via Lambda + SES
 # BUDDY_EMAIL_LAMBDA_NAME=cooking-rag-buddy-email
 # SES_FROM_EMAIL=you@verified-domain.com
+# Optional: AI-generated recipe photos (do not commit the key)
+# GEMINI_API_KEY=
+# GEMINI_MODEL=gemini-3.1-flash-image
 S3_BUCKET_NAME=<your_bucket_name>
 S3_RECIPES_PREFIX=recipes/
 RDS_HOST=<your_cluster_writer_endpoint>
@@ -430,6 +488,8 @@ RDS_HOST=<your_cluster_writer_endpoint>
 RDS_PORT=5432
 RDS_DB=postgres
 RDS_USER=postgres
+GEMINI_API_KEY=<your_google_ai_studio_key>
+GEMINI_MODEL=gemini-3.1-flash-image
 ```
 
 Upload the CSV catalog to S3 before testing RAG search:
@@ -484,7 +544,8 @@ cooking_rag_AWS/
 │   ├── pantry.py
 │   └── buddies.py
 ├── services/
-│   └── s3_recipes.py         # S3 recipe index for share picker
+│   ├── s3_recipes.py         # S3 recipe index + image URL resolution
+│   └── recipe_images.py      # Gemini generation, S3 upload, image overrides
 ├── lambda/
 │   └── buddy_email/        # Bedrock + SES email Lambda
 ├── scripts/
