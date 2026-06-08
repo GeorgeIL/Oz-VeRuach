@@ -208,18 +208,20 @@ database (the `CREATE TABLE IF NOT EXISTS` block is safe to re-run).
 3. Note the **Knowledge Base ID** and **Data Source ID** (short alphanumeric
    strings in the Bedrock console - not the S3 URL).
 4. Sync the data source at least once before launching the app.
-5. If you previously created separate data sources for CSV and Markdown, either
-   consolidate them into one `recipes/` data source or set
-   `BEDROCK_KB_SYNC_ALL=true` in `env.ec2` so the app syncs every data source
-   attached to the knowledge base.
+5. Set `BEDROCK_KB_SYNC_ALL=true` in `.env` / `env.ec2` so the app syncs every
+   data source attached to the knowledge base (recommended if `BEDROCK_KB_DS_ID`
+   is stale or you have multiple data sources). After rebuilding the catalog with
+   `python3 scripts/csv_to_catalog_md.py --half --wipe-all-catalog` (or
+   `--wipe-catalog`), trigger one ingestion job — upload any recipe or restart
+   the app with sync enabled so Chef AI retrieval stays aligned with S3.
 
 #### Knowledge base sync troubleshooting
 
 | Symptom | Likely cause | Fix |
 | ------- | ------------ | --- |
-| `Failed to start knowledge base sync` with an AWS error in the alert | Wrong `BEDROCK_KB_ID` / `BEDROCK_KB_DS_ID` in `env.ec2` | Match IDs from the Bedrock console; rebuild the Docker image after editing `env.ec2` |
-| Sync says **already in progress** | A previous ingestion job is still running | Wait 1–3 minutes and click **Refresh index** again |
-| Sidebar shows `0 catalog` recipes | Catalog `.md` files not uploaded yet | Run `python3 scripts/csv_to_catalog_md.py --wipe-catalog`, then refresh index |
+| `Failed to start knowledge base sync` with an AWS error in the alert | Wrong `BEDROCK_KB_ID` / `BEDROCK_KB_DS_ID` in `env.ec2` | Match IDs from the Bedrock console, or set `BEDROCK_KB_SYNC_ALL=true`; rebuild the Docker image after editing `env.ec2` |
+| Sync says **already in progress** | A previous ingestion job is still running | Wait 1–3 minutes; the app retries on the next recipe upload or delete |
+| Sidebar shows `0 catalog` recipes | Catalog `.md` files not uploaded yet | Run `python3 scripts/csv_to_catalog_md.py --wipe-catalog`, then wait for KB sync |
 | Recipe titles show as numbers (`0`, `1089`) | Old upload used CSV row index as title | Re-run `csv_to_catalog_md.py --wipe-catalog` to rebuild with recipe names |
 | Sidebar count looks like user recipes only | Old UI showed RDS count as “chunks” | After this update, the sidebar shows `catalog + yours` from S3 and RDS |
 | Retrieval works but sync fails | IAM missing `bedrock-agent:StartIngestionJob` | Ensure the EC2 role includes Bedrock agent permissions |
@@ -321,8 +323,7 @@ SECRET_KEY=<any_long_random_string>
 AWS_REGION=us-east-1
 BEDROCK_KB_ID=<your_kb_id>
 BEDROCK_KB_DS_ID=<your_ds_id>
-# Optional: set to true if the KB has multiple data sources to sync
-# BEDROCK_KB_SYNC_ALL=true
+BEDROCK_KB_SYNC_ALL=true
 # Optional: cooking buddies email via Lambda + SES
 # BUDDY_EMAIL_LAMBDA_NAME=cooking-rag-buddy-email
 # SES_FROM_EMAIL=you@verified-domain.com
@@ -481,7 +482,7 @@ AWS_ACCESS_KEY_ID=<your_iam_user_access_key>
 AWS_SECRET_ACCESS_KEY=<your_iam_user_secret_key>
 BEDROCK_KB_ID=<your_kb_id>
 BEDROCK_KB_DS_ID=<your_ds_id>
-# BEDROCK_KB_SYNC_ALL=true
+BEDROCK_KB_SYNC_ALL=true
 S3_BUCKET_NAME=<your_bucket_name>
 S3_RECIPES_PREFIX=recipes/
 RDS_HOST=<your_cluster_writer_endpoint>
@@ -573,8 +574,9 @@ cooking_rag_AWS/
   arm64 vs EC2 amd64 mismatch using `docker buildx --platform linux/amd64`,
   which is now documented in the deployment guide.
 - **Knowledge Base auto-sync** - every recipe upload or deletion triggers a
-  Bedrock KB sync, and the Chef AI sidebar exposes a **Refresh index** button
-  with catalog + user recipe counts from S3/RDS.
+  Bedrock KB sync (`BEDROCK_KB_SYNC_ALL=true` syncs all data sources). Chef AI
+  uses hybrid RAG: full S3 markdown for named recipes plus KB chunks for open
+  questions, with expanded retrieval queries and full chat history.
 
 ### Challenges Encountered During the AWS Refactor
 

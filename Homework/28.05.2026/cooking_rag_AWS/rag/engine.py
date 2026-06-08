@@ -41,6 +41,12 @@ Guidelines:
 - Mention estimated cooking times and difficulty when helpful
 - Be concise but thorough; avoid unnecessary filler
 
+Grounding rules (critical):
+- When answering about a specific cookbook recipe's ingredients, steps, or tags, use ONLY the provided context blocks — especially any block labeled "Authoritative cookbook entry".
+- If multiple recipes appear in context, prefer the Authoritative cookbook entry over other excerpts.
+- Do not invent, merge, or substitute details from other recipes. If the context does not contain the answer, say you cannot find it in the cookbook.
+- For meta-questions about the conversation (e.g. "what was my last question?", "what did I ask before?"), answer from the chat history shown in the messages — not from the knowledge base.
+
 New Recipe Format:
 You MUST append the recipe-json block ONLY in this one specific situation:
   → The user explicitly asked you to CREATE or INVENT a new recipe, AND you are writing out a complete recipe (title + ingredients + steps) that does NOT already exist in the cookbook.
@@ -148,6 +154,8 @@ def ask_chef(
     context_chunks: list[str],
     recent_history: list[dict],
     pantry: list[str] | None = None,
+    *,
+    has_authoritative_context: bool = False,
 ) -> str:
     """
     Call Nova Lite 1.0 via the Bedrock Converse API.
@@ -174,7 +182,7 @@ def ask_chef(
         # Enforce alternation: skip if same role as the last added message
         if messages and messages[-1]["role"] == role:
             continue
-        content = str(msg.get("content", ""))[:500]
+        content = str(msg.get("content", ""))[: Config.HISTORY_MESSAGE_MAX_CHARS]
         messages.append({"role": role, "content": [{"text": content}]})
 
     # Converse API requires first message to be "user"; drop leading assistant turns
@@ -190,11 +198,12 @@ def ask_chef(
 
     messages.append({"role": "user", "content": [{"text": user_content}]})
 
+    temperature = 0.3 if has_authoritative_context else 0.7
     response = runtime.converse(
         modelId=Config.NOVA_MODEL_ID,
         system=[{"text": system_text}],
         messages=messages,
-        inferenceConfig={"maxTokens": 1024, "temperature": 0.7},
+        inferenceConfig={"maxTokens": 1024, "temperature": temperature},
     )
     return response["output"]["message"]["content"][0]["text"]
 

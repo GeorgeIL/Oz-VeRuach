@@ -4,6 +4,7 @@ from auth_utils import get_current_user, login_required
 from config import Config
 from db import get_db
 from rag import engine as rag
+from services import recipe_lookup
 
 chat_bp = Blueprint("chat", __name__, url_prefix="/chat")
 
@@ -87,10 +88,11 @@ def ask():
         )
         recent = [dict(r) for r in cur.fetchall()]
 
-    # Retrieve recipe chunks from AWS Bedrock Knowledge Base
-    recipe_chunks = rag.retrieve_chunks(question, Config.TOP_K)
+    active_slugs = recipe_lookup.resolve_active_recipe_slugs(question, recent, conn)
+    authoritative = recipe_lookup.build_authoritative_context(active_slugs, conn)
+    retrieval_query = recipe_lookup.build_retrieval_query(question, recent, conn)
+    recipe_chunks = rag.retrieve_chunks(retrieval_query, Config.TOP_K)
 
-    # Build context: inject catalog size so Chef AI knows what's available
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) AS cnt FROM recipes")
         user_count = cur.fetchone()["cnt"]
@@ -99,14 +101,21 @@ def ask():
     catalog_count = index_status["catalog_count"]
     kb_note = (
         f"[Catalog note: The knowledge base contains {catalog_count} built-in catalog "
-        f"recipe(s) plus {user_count} user-added recipe(s). Answer confidently about "
-        f"what's available.]"
+        f"recipe(s) plus {user_count} user-added recipe(s). "
+        f"Use authoritative entries when present; otherwise rely on retrieved excerpts.]"
     )
-    context_chunks = [kb_note] + recipe_chunks
+    context_chunks = authoritative + [kb_note] + recipe_chunks
+    has_authoritative = bool(authoritative)
 
     # Call Nova Lite via Bedrock
     try:
-        answer = rag.ask_chef(question, context_chunks, recent, pantry)
+        answer = rag.ask_chef(
+            question,
+            context_chunks,
+            recent,
+            pantry,
+            has_authoritative_context=has_authoritative,
+        )
     except Exception as exc:
         import traceback
 

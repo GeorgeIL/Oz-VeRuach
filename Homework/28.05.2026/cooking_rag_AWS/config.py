@@ -40,7 +40,8 @@ class Config:
 
     # RAG
     TOP_K = int(os.getenv("TOP_K", "5"))
-    HISTORY_MESSAGES = int(os.getenv("HISTORY_MESSAGES", "6"))
+    HISTORY_MESSAGES = int(os.getenv("HISTORY_MESSAGES", "12"))
+    HISTORY_MESSAGE_MAX_CHARS = int(os.getenv("HISTORY_MESSAGE_MAX_CHARS", "8000"))
 
     # Data folder
     DATA_FOLDER = BASE_DIR / "data"
