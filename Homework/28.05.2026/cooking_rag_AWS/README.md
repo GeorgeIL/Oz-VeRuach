@@ -37,9 +37,9 @@ recipes, suggestions and answers.
        │  IAM token auth         │    │  3. sync_knowledge    │
        │  ThreadedConnectionPool │    │     _base() on upload │  ┌───────────────────────┐
        │  14-min token cache     │    └───────────────────────┘  │  Amazon S3            │
-       └─────────────────────────┘                               │  recipes/<slug>.md    │
-                                                                 │  (recipe store +      │
-                                                                 │   KB data source)     │
+       └─────────────────────────┘                                                                                                │  recipes/catalog/*.md │
+                                                                 │  recipes/<slug>.md    │
+                                                                 │  (KB data source)     │
                                                                  └───────────────────────┘
 
 Deployment: Docker container on EC2 Ubuntu 24.04 (t3.micro, 20 GB)
@@ -113,18 +113,57 @@ print('Schema applied!')
 ### 2 - Amazon S3
 
 1. Create a bucket (e.g. `my-cooking-rag-bucket`).
-2. Upload recipe `.md` files under the `recipes/` prefix, or run
-   `python3 scripts/generate_csv_summary.py` to generate a catalog from
-   `data/recipes.csv` and upload it automatically.
+2. Place your catalog CSV at `data/recipes.csv`.
+3. Upload one Markdown file per recipe (recommended for RAG):
+
+```bash
+python3 scripts/csv_to_catalog_md.py --wipe-catalog
+```
+
+This writes `recipes/catalog/{slug}.md` for every CSV row (~1100 files) using the
+**recipe name** from the CSV (not the row index), plus `recipes/catalog/manifest.json`
+for fast title/tag lookup in the app. Tags come from the CSV `cuisine_path` column.
+
+All recipes — catalog CSV rows and user-created recipes (manual entry, PDF upload,
+Chef AI save) — are stored under **`recipes/catalog/{slug}.md`**.
+
+If you previously uploaded catalog files with numeric slugs (`0.md`, `1089.md`), run
+with `--wipe-catalog` to remove those legacy files before re-uploading.
+
+To move older user recipes from `recipes/{slug}.md` to the catalog prefix:
+
+```bash
+python3 scripts/migrate_recipes_to_catalog.py
+```
+
+4. Optional: `python3 scripts/generate_csv_summary.py` uploads a single
+   `recipes/recipes-catalog-summary.md` with aggregate stats only. That file is
+   **not** a substitute for per-recipe files when you want semantic search.
 
 ### 3 - Amazon Bedrock Knowledge Base
 
 1. In the Bedrock console, **enable model access** for **Amazon Nova Lite 1.0**
    (`amazon.nova-lite-v1:0`).
-2. Create a **Knowledge Base** backed by the S3 bucket (`recipes/` prefix).
+2. Create a **Knowledge Base** with **one S3 data source** on the `recipes/`
+   prefix (covers all `recipes/catalog/*.md` files).
 3. Note the **Knowledge Base ID** and **Data Source ID** (short alphanumeric
    strings in the Bedrock console - not the S3 URL).
 4. Sync the data source at least once before launching the app.
+5. If you previously created separate data sources for CSV and Markdown, either
+   consolidate them into one `recipes/` data source or set
+   `BEDROCK_KB_SYNC_ALL=true` in `env.ec2` so the app syncs every data source
+   attached to the knowledge base.
+
+#### Knowledge base sync troubleshooting
+
+| Symptom | Likely cause | Fix |
+| ------- | ------------ | --- |
+| `Failed to start knowledge base sync` with an AWS error in the alert | Wrong `BEDROCK_KB_ID` / `BEDROCK_KB_DS_ID` in `env.ec2` | Match IDs from the Bedrock console; rebuild the Docker image after editing `env.ec2` |
+| Sync says **already in progress** | A previous ingestion job is still running | Wait 1–3 minutes and click **Refresh index** again |
+| Sidebar shows `0 catalog` recipes | Catalog `.md` files not uploaded yet | Run `python3 scripts/csv_to_catalog_md.py --wipe-catalog`, then refresh index |
+| Recipe titles show as numbers (`0`, `1089`) | Old upload used CSV row index as title | Re-run `csv_to_catalog_md.py --wipe-catalog` to rebuild with recipe names |
+| Sidebar count looks like user recipes only | Old UI showed RDS count as “chunks” | After this update, the sidebar shows `catalog + yours` from S3 and RDS |
+| Retrieval works but sync fails | IAM missing `bedrock-agent:StartIngestionJob` | Ensure the EC2 role includes Bedrock agent permissions |
 
 ### 4 - IAM role for EC2
 
@@ -170,6 +209,44 @@ aws ec2 authorize-security-group-ingress --group-id $SG_ID --protocol tcp --port
 echo "Security group: $SG_ID"
 ```
 
+### 6 - Cooking Buddies email (optional)
+
+Cooking buddies (name, email, picture URL) are stored in **Aurora PostgreSQL** only.
+Profile pictures are external URLs — no S3 upload.
+
+#### Prerequisites
+
+1. Upload the catalog to S3: `python3 scripts/csv_to_catalog_md.py --wipe-catalog`
+2. Verify a sender address in **Amazon SES** (`SES_FROM_EMAIL`)
+3. Deploy the Lambda in [`lambda/buddy_email/`](lambda/buddy_email/) (see its README)
+4. Grant the EC2 role `lambda:InvokeFunction` on the Lambda ARN
+5. Add to `env.ec2`:
+
+```
+BUDDY_EMAIL_LAMBDA_NAME=cooking-rag-buddy-email
+SES_FROM_EMAIL=you@your-verified-domain.com
+```
+
+6. Rebuild and redeploy the Docker image
+
+#### Using Share a recipe
+
+1. Add buddies at **/buddies/** (top nav)
+2. In the **Share a recipe** section, click **Browse recipes** to pick from the full catalog (search by name or tag)
+3. Choose buddies, add an optional personal note, and click **Send recipe email**
+4. Bedrock Nova Lite composes the email body; SES delivers it
+
+Recipe detail pages link to `/buddies/?recipe=<slug>` to pre-select a recipe.
+
+#### Troubleshooting
+
+| Issue | Fix |
+| ----- | --- |
+| Recipe list empty | Run `csv_to_catalog_md.py`; check `S3_BUCKET_NAME` and `recipes/` prefix |
+| First search is slow | Normal — the app builds an S3 recipe index once, then caches it for 10 minutes |
+| Email fails | Verify recipient in SES sandbox; check Lambda CloudWatch logs at `/aws/lambda/cooking-rag-buddy-email` |
+| Email service not configured | Set `BUDDY_EMAIL_LAMBDA_NAME` and `SES_FROM_EMAIL` in `.env` / `env.ec2` and redeploy |
+
 ---
 
 ## Deploying to EC2 (Ubuntu)
@@ -185,6 +262,11 @@ SECRET_KEY=<any_long_random_string>
 AWS_REGION=us-east-1
 BEDROCK_KB_ID=<your_kb_id>
 BEDROCK_KB_DS_ID=<your_ds_id>
+# Optional: set to true if the KB has multiple data sources to sync
+# BEDROCK_KB_SYNC_ALL=true
+# Optional: cooking buddies email via Lambda + SES
+# BUDDY_EMAIL_LAMBDA_NAME=cooking-rag-buddy-email
+# SES_FROM_EMAIL=you@verified-domain.com
 S3_BUCKET_NAME=<your_bucket_name>
 S3_RECIPES_PREFIX=recipes/
 RDS_HOST=<your_cluster_writer_endpoint>
@@ -337,6 +419,7 @@ AWS_ACCESS_KEY_ID=<your_iam_user_access_key>
 AWS_SECRET_ACCESS_KEY=<your_iam_user_secret_key>
 BEDROCK_KB_ID=<your_kb_id>
 BEDROCK_KB_DS_ID=<your_ds_id>
+# BEDROCK_KB_SYNC_ALL=true
 S3_BUCKET_NAME=<your_bucket_name>
 S3_RECIPES_PREFIX=recipes/
 RDS_HOST=<your_cluster_writer_endpoint>
@@ -344,6 +427,14 @@ RDS_PORT=5432
 RDS_DB=postgres
 RDS_USER=postgres
 ```
+
+Upload the CSV catalog to S3 before testing RAG search:
+
+```bash
+python3 scripts/csv_to_catalog_md.py --wipe-catalog
+```
+
+The recipes page supports search by **recipe name or tag** (20 recipes per page).
 
 ### 2. Run locally via Docker
 
@@ -380,15 +471,22 @@ cooking_rag_AWS/
 │   └── schema.sql          # CREATE TABLE IF NOT EXISTS for all tables
 ├── rag/
 │   ├── __init__.py
-│   └── engine.py           # retrieve_chunks(), ask_chef(), sync_knowledge_base()
+│   └── engine.py           # retrieve_chunks(), ask_chef(), sync_knowledge_base(), get_index_status()
 ├── routes/
 │   ├── __init__.py
 │   ├── auth.py
 │   ├── chat.py
 │   ├── recipes.py
-│   └── pantry.py
+│   ├── pantry.py
+│   └── buddies.py
+├── services/
+│   └── s3_recipes.py         # S3 recipe index for share picker
+├── lambda/
+│   └── buddy_email/        # Bedrock + SES email Lambda
 ├── scripts/
-│   └── generate_csv_summary.py   # Builds S3 catalog from recipes.csv
+│   ├── csv_to_catalog_md.py      # One .md per CSV row → recipes/catalog/ + manifest
+│   ├── migrate_recipes_to_catalog.py  # Move legacy user recipes into catalog/
+│   └── generate_csv_summary.py   # Optional aggregate catalog summary only
 ├── static/                 # CSS + JS
 ├── templates/              # Jinja2 HTML
 └── Pictures/               # Screenshots for documentation
@@ -410,7 +508,8 @@ cooking_rag_AWS/
   arm64 vs EC2 amd64 mismatch using `docker buildx --platform linux/amd64`,
   which is now documented in the deployment guide.
 - **Knowledge Base auto-sync** - every recipe upload or deletion triggers a
-  Bedrock KB sync, so the RAG retrieval stays current without manual steps.
+  Bedrock KB sync, and the Chef AI sidebar exposes a **Refresh index** button
+  with catalog + user recipe counts from S3/RDS.
 
 ### Challenges Encountered During the AWS Refactor
 

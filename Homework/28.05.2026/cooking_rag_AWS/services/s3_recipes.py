@@ -1,0 +1,335 @@
+"""Unified recipe index from S3 catalog markdown files plus RDS metadata."""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from datetime import datetime
+from typing import TypedDict
+
+import boto3
+
+from config import Config
+
+_INDEX_TTL_SECONDS = 600
+_s3_client = None
+_index_cache: list[RecipeIndexEntry] | None = None
+_index_expires_at = 0.0
+_manifest_cache: dict[str, dict] | None = None
+_manifest_expires_at = 0.0
+
+_TITLE_RE = re.compile(r"^#\s+(.+)", re.MULTILINE)
+_TAGS_RE = re.compile(r"^\*\*Tags:\*\*\s*(.+)", re.MULTILINE | re.IGNORECASE)
+_CATALOG_PREFIX = "catalog/"
+_MANIFEST_KEY_SUFFIX = "catalog/manifest.json"
+
+
+class RecipeIndexEntry(TypedDict):
+    s3_key: str
+    slug: str
+    title: str
+    source: str
+    description: str
+    tags: list
+    author_username: str | None
+    created_at: datetime | None
+    last_modified: datetime | None
+
+
+def _s3():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3", region_name=Config.AWS_REGION)
+    return _s3_client
+
+
+def catalog_s3_key(slug: str) -> str:
+    return f"{Config.S3_RECIPES_PREFIX}{_CATALOG_PREFIX}{slug}.md"
+
+
+def invalidate_index_cache() -> None:
+    global _index_cache, _index_expires_at, _manifest_cache, _manifest_expires_at
+    _index_cache = None
+    _index_expires_at = 0.0
+    _manifest_cache = None
+    _manifest_expires_at = 0.0
+
+
+def parse_title(md_text: str) -> str:
+    match = _TITLE_RE.search(md_text or "")
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def parse_tags(md_text: str) -> list[str]:
+    match = _TAGS_RE.search(md_text or "")
+    if not match:
+        return []
+    raw = match.group(1).strip()
+    tags = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for tag in tags:
+        if tag not in seen:
+            seen.add(tag)
+            unique.append(tag)
+    return unique
+
+
+def _slug_from_key(key: str) -> str:
+    prefix = Config.S3_RECIPES_PREFIX
+    relative = key[len(prefix) :] if key.startswith(prefix) else key
+    if relative.startswith(_CATALOG_PREFIX) and relative.endswith(".md"):
+        return relative[len(_CATALOG_PREFIX) : -3]
+    if relative.endswith(".md"):
+        return relative[:-3]
+    return relative
+
+
+def _title_from_slug(slug: str) -> str:
+    return slug.replace("-", " ").strip().title()
+
+
+def _manifest_key() -> str:
+    return f"{Config.S3_RECIPES_PREFIX}{_MANIFEST_KEY_SUFFIX}"
+
+
+def _load_catalog_manifest() -> dict[str, dict]:
+    global _manifest_cache, _manifest_expires_at
+
+    now = time.monotonic()
+    if _manifest_cache is not None and now < _manifest_expires_at:
+        return _manifest_cache
+
+    lookup: dict[str, dict] = {}
+    if not Config.S3_BUCKET:
+        _manifest_cache = lookup
+        _manifest_expires_at = now + _INDEX_TTL_SECONDS
+        return lookup
+
+    try:
+        response = _s3().get_object(Bucket=Config.S3_BUCKET, Key=_manifest_key())
+        payload = json.loads(response["Body"].read().decode("utf-8"))
+        for item in payload.get("recipes", []):
+            slug = item.get("slug")
+            if not slug:
+                continue
+            tags = item.get("tags") or []
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",") if t.strip()]
+            lookup[slug] = {
+                "title": item.get("title") or _title_from_slug(slug),
+                "tags": tags,
+                "s3_key": item.get("s3_key") or catalog_s3_key(slug),
+            }
+    except Exception:
+        pass
+
+    _manifest_cache = lookup
+    _manifest_expires_at = now + _INDEX_TTL_SECONDS
+    return lookup
+
+
+def _fetch_md_header(key: str) -> str:
+    try:
+        response = _s3().get_object(
+            Bucket=Config.S3_BUCKET,
+            Key=key,
+            Range="bytes=0-2047",
+        )
+        return response["Body"].read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _load_rds_meta(conn) -> dict[str, dict]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT slug, title, description, tags, author_username, created_at, s3_key
+            FROM recipes
+            """
+        )
+        meta: dict[str, dict] = {}
+        for row in cur.fetchall():
+            r = dict(row)
+            tags = r.get("tags") or []
+            if isinstance(tags, str):
+                tags = json.loads(tags)
+            meta[r["slug"]] = {
+                "title": r["title"],
+                "description": r.get("description") or "",
+                "tags": tags or [],
+                "author_username": r.get("author_username"),
+                "created_at": r.get("created_at"),
+                "s3_key": r.get("s3_key") or catalog_s3_key(r["slug"]),
+            }
+        return meta
+
+
+def build_recipe_index(conn) -> list[RecipeIndexEntry]:
+    global _index_cache, _index_expires_at
+
+    now = time.monotonic()
+    if _index_cache is not None and now < _index_expires_at:
+        return _index_cache
+
+    if not Config.S3_BUCKET:
+        return []
+
+    rds_meta = _load_rds_meta(conn)
+    manifest = _load_catalog_manifest()
+    entries: list[RecipeIndexEntry] = []
+    indexed_keys: set[str] = set()
+    catalog_prefix = f"{Config.S3_RECIPES_PREFIX}{_CATALOG_PREFIX}"
+    paginator = _s3().get_paginator("list_objects_v2")
+
+    for page in paginator.paginate(Bucket=Config.S3_BUCKET, Prefix=catalog_prefix):
+        for obj in page.get("Contents", []):
+            key = obj.get("Key", "")
+            if not key.endswith(".md"):
+                continue
+            if key.endswith("recipes-catalog-summary.md"):
+                continue
+
+            slug = _slug_from_key(key)
+            rds = rds_meta.get(slug, {})
+            manifest_item = manifest.get(slug, {})
+
+            title = (
+                rds.get("title")
+                or manifest_item.get("title")
+                or _title_from_slug(slug)
+            )
+            tags = rds.get("tags") or manifest_item.get("tags") or []
+            if not rds.get("tags") and not manifest_item.get("tags"):
+                header = _fetch_md_header(key)
+                if header:
+                    parsed_title = parse_title(header)
+                    if parsed_title and not manifest_item.get("title"):
+                        title = parsed_title
+                    tags = parse_tags(header)
+
+            source = "user" if slug in rds_meta else "catalog"
+            indexed_keys.add(key)
+            entries.append(
+                {
+                    "s3_key": key,
+                    "slug": slug,
+                    "title": title,
+                    "source": source,
+                    "description": rds.get("description", ""),
+                    "tags": tags,
+                    "author_username": rds.get("author_username"),
+                    "created_at": rds.get("created_at"),
+                    "last_modified": obj.get("LastModified"),
+                }
+            )
+
+    for slug, rds in rds_meta.items():
+        s3_key = rds.get("s3_key") or catalog_s3_key(slug)
+        if s3_key in indexed_keys:
+            continue
+        entries.append(
+            {
+                "s3_key": s3_key,
+                "slug": slug,
+                "title": rds.get("title") or _title_from_slug(slug),
+                "source": "user",
+                "description": rds.get("description", ""),
+                "tags": rds.get("tags", []),
+                "author_username": rds.get("author_username"),
+                "created_at": rds.get("created_at"),
+                "last_modified": None,
+            }
+        )
+
+    entries.sort(key=lambda item: item["title"].lower())
+    _index_cache = entries
+    _index_expires_at = now + _INDEX_TTL_SECONDS
+    return entries
+
+
+def _sort_key(item: RecipeIndexEntry, sort: str):
+    ts = item.get("created_at") or item.get("last_modified")
+    if ts is not None and hasattr(ts, "timestamp"):
+        stamp = ts.timestamp()
+    else:
+        stamp = 0.0
+
+    if sort in ("latest", "oldest"):
+        return stamp
+    return item["title"].lower()
+
+
+def _matches_query(item: RecipeIndexEntry, q: str) -> bool:
+    if q in item["title"].lower() or q in item["slug"].lower():
+        return True
+    return any(q in str(tag).lower() for tag in item.get("tags") or [])
+
+
+def search_recipes(
+    conn,
+    query: str = "",
+    limit: int = 50,
+    offset: int = 0,
+    sort: str = "az",
+) -> tuple[list[RecipeIndexEntry], int]:
+    index = build_recipe_index(conn)
+    q = (query or "").strip().lower()
+
+    if q:
+        filtered = [item for item in index if _matches_query(item, q)]
+    else:
+        filtered = list(index)
+
+    reverse = sort in ("za", "latest")
+    filtered.sort(key=lambda item: _sort_key(item, sort), reverse=reverse)
+
+    total = len(filtered)
+    page = filtered[offset : offset + limit]
+    return page, total
+
+
+def is_valid_recipe_key(s3_key: str) -> bool:
+    prefix = Config.S3_RECIPES_PREFIX
+    return (
+        bool(s3_key)
+        and s3_key.startswith(prefix)
+        and s3_key.endswith(".md")
+        and ".." not in s3_key
+    )
+
+
+def get_recipe_content(s3_key: str) -> str:
+    if not is_valid_recipe_key(s3_key):
+        raise ValueError("Invalid recipe key")
+    response = _s3().get_object(Bucket=Config.S3_BUCKET, Key=s3_key)
+    return response["Body"].read().decode("utf-8", errors="replace")
+
+
+def get_recipe_preview(s3_key: str, max_chars: int = 500) -> dict:
+    content = get_recipe_content(s3_key)
+    title = title_for_key(s3_key, content)
+    preview = content[:max_chars]
+    if len(content) > max_chars:
+        preview += "..."
+    return {"s3_key": s3_key, "title": title, "preview": preview}
+
+
+def title_for_key(s3_key: str, md_text: str = "") -> str:
+    title = parse_title(md_text)
+    if title:
+        return title
+    slug = _slug_from_key(s3_key)
+    return _title_from_slug(slug)
+
+
+def build_email_context(md_text: str, personal_note: str = "") -> str:
+    body = md_text.strip()
+    note = (personal_note or "").strip()
+    if note:
+        return f"{body}\n\n---\nPersonal note from sender:\n{note}"
+    return body

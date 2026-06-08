@@ -1,8 +1,7 @@
 {% extends "base.html" %} {% block title %}{{ recipe.title }} — Smart Cookbook{%
-endblock %} {% block extra_css %}<link
-  rel="stylesheet"
-  href="{{ url_for('static', filename='css/recipes.css') }}"
-/>{% endblock %} {% block content %}
+endblock %} {% block extra_css %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/recipes.css') }}" />
+{% endblock %} {% block content %}
 <div class="detail-header">
   <a href="{{ url_for('recipes.list_recipes') }}" class="back-link"
     >← All Recipes</a
@@ -14,6 +13,13 @@ endblock %} {% block extra_css %}<link
       title="Ask Chef AI about this recipe"
       >💬 Ask Chef AI</a
     >
+    <a
+      href="{{ url_for('buddies.buddies_page') }}?s3_key={{ recipe.s3_key | urlencode }}&amp;title={{ recipe.title | urlencode }}&amp;source={{ 'user' if recipe.author_username else 'catalog' }}"
+      class="btn-secondary"
+      title="Email this recipe to your cooking buddies"
+    >
+      📧 Share with buddies
+    </a>
     {% if is_author %}
     <a
       href="{{ url_for('recipes.edit_recipe', slug=recipe.slug) }}"

@@ -68,3 +68,18 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS messages_conv_time_idx ON messages(conversation_id, created_at);
+
+-- ── Cooking buddies (per-user contacts for recipe sharing) ─────────────────
+
+CREATE TABLE IF NOT EXISTS cooking_buddies (
+    id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id      UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         VARCHAR(100) NOT NULL,
+    email        VARCHAR(255) NOT NULL,
+    picture_url  VARCHAR(1000) NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, email)
+);
+
+CREATE INDEX IF NOT EXISTS cooking_buddies_user_idx ON cooking_buddies(user_id);

@@ -19,6 +19,11 @@ class Config:
     # Bedrock Knowledge Base
     BEDROCK_KB_ID = os.getenv("BEDROCK_KB_ID")
     BEDROCK_KB_DS_ID = os.getenv("BEDROCK_KB_DS_ID")
+    BEDROCK_KB_SYNC_ALL = os.getenv("BEDROCK_KB_SYNC_ALL", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     NOVA_MODEL_ID = os.getenv("NOVA_MODEL_ID", "amazon.nova-lite-v1:0")
 
     # S3
@@ -38,3 +43,9 @@ class Config:
 
     # Data folder
     DATA_FOLDER = BASE_DIR / "data"
+
+    # Cooking buddies email (Lambda + SES; SES_FROM_EMAIL is used by Lambda, not Flask)
+    BUDDY_EMAIL_LAMBDA_NAME = os.getenv(
+        "BUDDY_EMAIL_LAMBDA_NAME", "cooking-rag-buddy-email"
+    )
+    SES_FROM_EMAIL = os.getenv("SES_FROM_EMAIL", "")

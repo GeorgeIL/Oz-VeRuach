@@ -47,12 +47,13 @@ def chat_page():
         messages = [dict(r) for r in cur.fetchall()]
         cur.execute("SELECT COUNT(*) AS cnt FROM recipes")
         user_recipe_count = cur.fetchone()["cnt"]
+    index_status = rag.get_index_status(user_recipe_count)
     return render_template(
         "chat/index.html",
         messages=messages,
         index_ready=True,
         index_error=None,
-        chunk_count=user_recipe_count,
+        index_status=index_status,
     )
 
 
@@ -89,14 +90,17 @@ def ask():
     # Retrieve recipe chunks from AWS Bedrock Knowledge Base
     recipe_chunks = rag.retrieve_chunks(question, Config.TOP_K)
 
-    # Build context: inject user recipe count info so Chef AI knows about the catalog
+    # Build context: inject catalog size so Chef AI knows what's available
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) AS cnt FROM recipes")
         user_count = cur.fetchone()["cnt"]
 
+    index_status = rag.get_index_status(user_count)
+    catalog_count = index_status["catalog_count"]
     kb_note = (
-        f"[Catalog note: The knowledge base contains ~1100 built-in recipes plus "
-        f"{user_count} user-added recipe(s). Answer confidently about what's available.]"
+        f"[Catalog note: The knowledge base contains {catalog_count} built-in catalog "
+        f"recipe(s) plus {user_count} user-added recipe(s). Answer confidently about "
+        f"what's available.]"
     )
     context_chunks = [kb_note] + recipe_chunks
 
@@ -168,9 +172,22 @@ def clear_history():
 
 
 @chat_bp.route("/reload-index", methods=["POST"])
+@chat_bp.route("/refresh-index", methods=["POST"])
 @login_required
 def reload_index():
-    job_id = rag.sync_knowledge_base()
-    if job_id:
-        return jsonify({"message": f"Knowledge base sync started (job: {job_id})"})
-    return jsonify({"error": "Failed to start knowledge base sync"}), 503
+    result = rag.sync_knowledge_base()
+    if result["ok"]:
+        payload = {"message": result["message"]}
+        if result.get("job_ids"):
+            payload["job_ids"] = result["job_ids"]
+        if result.get("error"):
+            payload["warning"] = result["error"]
+        return jsonify(payload)
+    return (
+        jsonify(
+            {
+                "error": result.get("error") or result["message"],
+            }
+        ),
+        503,
+    )

@@ -182,11 +182,15 @@ async function saveAiRecipe(data, btn) {
 
 /* ── Index / history controls ────────────────────────────────────────────────── */
 
-async function reloadIndex() {
-  const resp = await fetch("/chat/reload-index", { method: "POST" });
+async function refreshIndex() {
+  const resp = await fetch("/chat/refresh-index", { method: "POST" });
   const data = await resp.json();
-  alert(resp.ok ? data.message : data.error || "Failed to rebuild index");
-  if (resp.ok) window.location.reload();
+  if (resp.ok) {
+    alert(data.warning ? `${data.message}\n\n${data.warning}` : data.message);
+    window.location.reload();
+    return;
+  }
+  alert(data.error || "Failed to refresh index");
 }
 
 async function clearHistory() {

@@ -179,6 +179,13 @@ body:has(.chat-layout) .page-wrapper {
   border: 1px solid #fecaca;
 }
 
+.index-sync-status,
+.sidebar-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted, #64748b);
+  margin: 0.25rem 0 0;
+}
+
 /* ── Chat main area ─────────────────────────────────────────────────────────── */
 .chat-main {
   flex: 1;

@@ -5,16 +5,21 @@ Public API:
   retrieve_chunks(question, top_k)  → list[str]   Bedrock KB semantic retrieval
   ask_chef(question, chunks, history, pantry) → str  Nova Lite via Converse API
   parse_recipe_from_text(raw_text)  → dict        Structured recipe extraction
-  sync_knowledge_base()             → str | None  Trigger KB ingestion job
+  sync_knowledge_base()             → dict        Trigger KB ingestion job(s)
+  get_index_status(user_count)      → dict        S3 + Bedrock index summary
 """
 
 import json
+import logging
 import re
-from typing import Optional
+from typing import Optional, TypedDict
 
 import boto3
+from botocore.exceptions import ClientError
 
 from config import Config
+
+logger = logging.getLogger(__name__)
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -68,11 +73,29 @@ _PARSE_PROMPT = (
     "Recipe text:\n"
 )
 
+# ── Types ─────────────────────────────────────────────────────────────────────
+
+
+class SyncResult(TypedDict):
+    ok: bool
+    job_ids: list[str]
+    message: str
+    error: str | None
+
+
+class IndexStatus(TypedDict):
+    catalog_count: int
+    user_count: int
+    total_documents: int
+    last_sync_status: str | None
+
+
 # ── Lazy AWS clients ──────────────────────────────────────────────────────────
 
 _bedrock_runtime = None
 _bedrock_agent_runtime = None
 _bedrock_agent = None
+_s3_client = None
 
 
 def _clients():
@@ -83,6 +106,13 @@ def _clients():
         _bedrock_agent_runtime = session.client("bedrock-agent-runtime")
         _bedrock_agent = session.client("bedrock-agent")
     return _bedrock_runtime, _bedrock_agent_runtime, _bedrock_agent
+
+
+def _s3():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3", region_name=Config.AWS_REGION)
+    return _s3_client
 
 
 # ── Retrieval ─────────────────────────────────────────────────────────────────
@@ -195,21 +225,190 @@ def parse_recipe_from_text(raw_text: str) -> dict:
         raise ValueError(f"Model returned non-JSON: {exc}") from exc
 
 
-# ── Knowledge Base sync ───────────────────────────────────────────────────────
+# ── Knowledge Base helpers ────────────────────────────────────────────────────
 
 
-def sync_knowledge_base() -> str | None:
-    """
-    Trigger a Bedrock Knowledge Base ingestion job so newly uploaded recipes
-    become searchable. Returns the job ID or None on failure.
-    Ingestion typically completes in 30 seconds to a few minutes.
-    """
+def _catalog_s3_prefix() -> str:
+    return f"{Config.S3_RECIPES_PREFIX}catalog/"
+
+
+def _data_source_ids_to_sync() -> list[str]:
+    """Return Bedrock data source IDs to sync for this KB."""
+    if Config.BEDROCK_KB_DS_ID and not Config.BEDROCK_KB_SYNC_ALL:
+        return [Config.BEDROCK_KB_DS_ID]
+    if not Config.BEDROCK_KB_ID:
+        return []
+
     _, _, agent = _clients()
+    ids: list[str] = []
+    kwargs: dict = {"knowledgeBaseId": Config.BEDROCK_KB_ID}
+    while True:
+        response = agent.list_data_sources(**kwargs)
+        for summary in response.get("dataSourceSummaries", []):
+            ds_id = summary.get("dataSourceId")
+            if ds_id:
+                ids.append(ds_id)
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
+        kwargs["nextToken"] = next_token
+    return ids
+
+
+def _get_in_progress_job_id(agent, data_source_id: str) -> str | None:
+    response = agent.list_ingestion_jobs(
+        knowledgeBaseId=Config.BEDROCK_KB_ID,
+        dataSourceId=data_source_id,
+        filters=[
+            {
+                "attributeName": "STATUS",
+                "operator": "IN",
+                "values": ["STARTING", "IN_PROGRESS"],
+            }
+        ],
+        maxResults=1,
+    )
+    jobs = response.get("ingestionJobSummaries", [])
+    if jobs:
+        return jobs[0].get("ingestionJobId")
+    return None
+
+
+def _start_ingestion_for_ds(agent, data_source_id: str) -> tuple[str | None, str]:
+    """Start ingestion for one data source. Returns (job_id, message)."""
     try:
         response = agent.start_ingestion_job(
             knowledgeBaseId=Config.BEDROCK_KB_ID,
-            dataSourceId=Config.BEDROCK_KB_DS_ID,
+            dataSourceId=data_source_id,
         )
-        return response.get("ingestionJob", {}).get("ingestionJobId")
-    except Exception:
+        job_id = response.get("ingestionJob", {}).get("ingestionJobId")
+        return job_id, f"Sync started for data source {data_source_id}"
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "ConflictException":
+            job_id = _get_in_progress_job_id(agent, data_source_id)
+            if job_id:
+                return job_id, f"Sync already in progress for data source {data_source_id}"
+            return None, f"Sync already in progress for data source {data_source_id}"
+        raise
+
+
+def sync_knowledge_base() -> SyncResult:
+    """
+    Trigger Bedrock Knowledge Base ingestion job(s) so newly uploaded recipes
+    become searchable. Returns a structured result with job IDs and errors.
+    """
+    if not Config.BEDROCK_KB_ID:
+        return {
+            "ok": False,
+            "job_ids": [],
+            "message": "Knowledge base sync failed",
+            "error": "BEDROCK_KB_ID is not configured",
+        }
+
+    data_source_ids = _data_source_ids_to_sync()
+    if not data_source_ids:
+        return {
+            "ok": False,
+            "job_ids": [],
+            "message": "Knowledge base sync failed",
+            "error": "No data sources found. Set BEDROCK_KB_DS_ID or BEDROCK_KB_SYNC_ALL=true",
+        }
+
+    _, _, agent = _clients()
+    job_ids: list[str] = []
+    messages: list[str] = []
+    errors: list[str] = []
+
+    for ds_id in data_source_ids:
+        try:
+            job_id, message = _start_ingestion_for_ds(agent, ds_id)
+            if job_id:
+                job_ids.append(job_id)
+            messages.append(message)
+        except ClientError as exc:
+            err_msg = exc.response.get("Error", {}).get("Message", str(exc))
+            logger.exception("Failed to start ingestion for data source %s", ds_id)
+            errors.append(f"{ds_id}: {err_msg}")
+        except Exception as exc:
+            logger.exception("Failed to start ingestion for data source %s", ds_id)
+            errors.append(f"{ds_id}: {exc}")
+
+    if job_ids:
+        summary = "; ".join(messages)
+        if len(job_ids) == 1:
+            user_message = f"Knowledge base sync started (job: {job_ids[0]})"
+        else:
+            user_message = f"Knowledge base sync started ({len(job_ids)} jobs: {', '.join(job_ids)})"
+        if "already in progress" in summary.lower():
+            user_message = summary
+        return {
+            "ok": True,
+            "job_ids": job_ids,
+            "message": user_message,
+            "error": "; ".join(errors) if errors else None,
+        }
+
+    return {
+        "ok": False,
+        "job_ids": [],
+        "message": "Failed to start knowledge base sync",
+        "error": "; ".join(errors) if errors else "Unknown error",
+    }
+
+
+def _count_s3_md_files(prefix: str) -> int:
+    if not Config.S3_BUCKET:
+        return 0
+    count = 0
+    paginator = _s3().get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=Config.S3_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            if obj.get("Key", "").endswith(".md"):
+                count += 1
+    return count
+
+
+def _get_last_sync_status() -> str | None:
+    if not Config.BEDROCK_KB_ID:
         return None
+
+    data_source_ids = _data_source_ids_to_sync()
+    if not data_source_ids:
+        return None
+
+    _, _, agent = _clients()
+    statuses: list[str] = []
+    for ds_id in data_source_ids:
+        try:
+            response = agent.list_ingestion_jobs(
+                knowledgeBaseId=Config.BEDROCK_KB_ID,
+                dataSourceId=ds_id,
+                maxResults=1,
+                sortBy={"attributeName": "STARTED_AT", "order": "DESCENDING"},
+            )
+            jobs = response.get("ingestionJobSummaries", [])
+            if jobs:
+                statuses.append(jobs[0].get("status", "UNKNOWN"))
+        except Exception:
+            logger.exception("Failed to fetch ingestion status for data source %s", ds_id)
+    if not statuses:
+        return None
+    if len(statuses) == 1:
+        return statuses[0]
+    return ", ".join(statuses)
+
+
+def get_index_status(user_count: int = 0) -> IndexStatus:
+    """
+    Return approximate indexed document counts from S3 plus the latest Bedrock
+    ingestion job status. User recipes are counted from RDS via user_count.
+    """
+    catalog_count = _count_s3_md_files(_catalog_s3_prefix())
+    total_documents = catalog_count + user_count
+    return {
+        "catalog_count": catalog_count,
+        "user_count": user_count,
+        "total_documents": total_documents,
+        "last_sync_status": _get_last_sync_status(),
+    }

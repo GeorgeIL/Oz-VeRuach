@@ -5,17 +5,31 @@ from config import Config
 from db import close_db, init_schema
 from routes.auth import auth_bp
 from routes.chat import chat_bp
+from routes.buddies import buddies_bp
 from routes.pantry import pantry_bp
 from routes.recipes import recipes_bp
 
 app = Flask(__name__)
 app.config.from_object(Config)
 
+if not Config.BEDROCK_KB_ID:
+    print("WARNING: BEDROCK_KB_ID is not set — knowledge base sync and retrieval will fail.")
+if not Config.BEDROCK_KB_DS_ID and not Config.BEDROCK_KB_SYNC_ALL:
+    print(
+        "WARNING: BEDROCK_KB_DS_ID is not set and BEDROCK_KB_SYNC_ALL is false — "
+        "sync will attempt to list all data sources when triggered."
+    )
+if not Config.BUDDY_EMAIL_LAMBDA_NAME:
+    print(
+        "WARNING: BUDDY_EMAIL_LAMBDA_NAME is not set — buddy recipe emails will fail."
+    )
+
 # ── Blueprints ────────────────────────────────────────────────────────────────
 app.register_blueprint(auth_bp)
 app.register_blueprint(recipes_bp)
 app.register_blueprint(chat_bp)
 app.register_blueprint(pantry_bp)
+app.register_blueprint(buddies_bp)
 
 # ── DB teardown ───────────────────────────────────────────────────────────────
 app.teardown_appcontext(close_db)

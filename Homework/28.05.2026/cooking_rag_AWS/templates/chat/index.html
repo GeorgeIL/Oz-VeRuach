@@ -50,17 +50,29 @@
         <div class="sidebar-panel" id="indexStatusPanel">
           {% if index_ready %}
           <div class="status-badge status-ok">
-            ✓ {{ chunk_count }} chunks indexed
+            ✓ {{ index_status.total_documents }} recipes indexed
+            ({{ index_status.catalog_count }} catalog + {{ index_status.user_count }} yours)
           </div>
+          {% if index_status.last_sync_status %}
+          <p class="index-sync-status sidebar-hint">
+            Last sync: {{ index_status.last_sync_status }}
+          </p>
+          {% endif %}
           {% else %}
           <div class="status-badge status-error">
             ⚠ {{ index_error or 'Index not ready' }}
           </div>
           {% endif %}
-          <button class="btn-secondary btn-sm mt-8" onclick="reloadIndex()">
-            🔄 Rebuild index
+          <button class="btn-secondary btn-sm mt-8" onclick="refreshIndex()">
+            🔄 Refresh index
           </button>
         </div>
+      </div>
+
+      <div class="sidebar-section">
+        <a href="{{ url_for('buddies.buddies_page') }}" class="btn-ghost btn-sm">
+          👥 Manage cooking buddies
+        </a>
       </div>
 
       <div class="sidebar-section">

@@ -21,8 +21,10 @@ from auth_utils import get_current_user, login_required
 from config import Config
 from db import get_db
 from rag import engine as rag
+from services import s3_recipes
 
 recipes_bp = Blueprint("recipes", __name__, url_prefix="/recipes")
+PAGE_SIZE = 20
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ def _s3():
 
 
 def _s3_key(slug: str) -> str:
-    return f"{Config.S3_RECIPES_PREFIX}{slug}.md"
+    return s3_recipes.catalog_s3_key(slug)
 
 
 def _upload_to_s3(slug: str, md_content: str) -> str:
@@ -113,21 +115,34 @@ def list_recipes():
     user = get_current_user()
     conn = get_db()
 
-    sort = request.args.get("sort", "latest")
-    sort_map = {
-        "latest": "created_at DESC",
-        "oldest": "created_at ASC",
-        "az": "title ASC",
-        "za": "title DESC",
-    }
-    order_by = sort_map.get(sort, "created_at DESC")
+    sort = request.args.get("sort", "az")
+    if sort not in ("latest", "oldest", "az", "za"):
+        sort = "az"
+
+    query = (request.args.get("q") or "").strip()
+    select_mode = request.args.get("select") == "1"
+    return_url = request.args.get("return") or url_for("buddies.buddies_page")
+
+    try:
+        page = max(int(request.args.get("page", 1)), 1)
+    except ValueError:
+        page = 1
+
+    offset = (page - 1) * PAGE_SIZE
+    items, total = s3_recipes.search_recipes(
+        conn, query, PAGE_SIZE, offset, sort=sort
+    )
+    total_pages = max((total + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+    if page > total_pages:
+        page = total_pages
+        offset = (page - 1) * PAGE_SIZE
+        items, total = s3_recipes.search_recipes(
+            conn, query, PAGE_SIZE, offset, sort=sort
+        )
+
+    recipes = [_row_to_recipe(item) for item in items]
 
     with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT id::text AS id, title, slug, description, tags, author_username, created_at "
-            f"FROM recipes ORDER BY {order_by}"
-        )
-        recipes = [_row_to_recipe(r) for r in cur.fetchall()]
         cur.execute(
             "SELECT recipe_slug FROM favorites WHERE user_id = %s", (user["sub"],)
         )
@@ -138,6 +153,13 @@ def list_recipes():
         recipes=recipes,
         favorites=favorites,
         current_sort=sort,
+        current_query=query,
+        page=page,
+        total=total,
+        total_pages=total_pages,
+        page_size=PAGE_SIZE,
+        select_mode=select_mode,
+        return_url=return_url,
     )
 
 
@@ -192,6 +214,7 @@ def create_recipe():
             ),
         )
     conn.commit()
+    s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
 
     return (
@@ -212,29 +235,57 @@ def view_recipe(slug):
     with conn.cursor() as cur:
         cur.execute(
             "SELECT id::text AS id, slug, title, description, ingredients, steps, notes, tags, "
-            "author_id::text AS author_id, author_username, created_at FROM recipes WHERE slug = %s",
+            "author_id::text AS author_id, author_username, created_at, s3_key "
+            "FROM recipes WHERE slug = %s",
             (slug,),
         )
         recipe = cur.fetchone()
-    if not recipe:
+
+    if recipe:
+        recipe = _row_to_recipe(recipe)
+        md_content = _recipe_to_md(
+            recipe["title"],
+            recipe["description"],
+            recipe["ingredients"],
+            recipe["steps"],
+            recipe["notes"],
+            recipe["tags"],
+        )
+        html_content = _render_md(md_content)
+        user = get_current_user()
+        is_author = user and user["sub"] == recipe["author_id"]
+        return render_template(
+            "recipes/detail.html",
+            recipe=recipe,
+            html_content=html_content,
+            is_author=is_author,
+        )
+
+    catalog_key = s3_recipes.catalog_s3_key(slug)
+    try:
+        md_content = s3_recipes.get_recipe_content(catalog_key)
+    except Exception:
         abort(404)
-    recipe = _row_to_recipe(recipe)
-    md_content = _recipe_to_md(
-        recipe["title"],
-        recipe["description"],
-        recipe["ingredients"],
-        recipe["steps"],
-        recipe["notes"],
-        recipe["tags"],
-    )
+
+    title = s3_recipes.title_for_key(catalog_key, md_content)
+    tags = s3_recipes.parse_tags(md_content)
     html_content = _render_md(md_content)
-    user = get_current_user()
-    is_author = user and user["sub"] == recipe["author_id"]
+    recipe = {
+        "id": "",
+        "slug": slug,
+        "title": title,
+        "description": "",
+        "tags": tags,
+        "author_username": None,
+        "author_id": None,
+        "created_at": None,
+        "s3_key": catalog_key,
+    }
     return render_template(
         "recipes/detail.html",
         recipe=recipe,
         html_content=html_content,
-        is_author=is_author,
+        is_author=False,
     )
 
 
@@ -278,12 +329,12 @@ def update_recipe(slug):
         return jsonify({"error": "Title is required"}), 400
 
     md_content = _recipe_to_md(title, description, ingredients, steps, notes, tags)
-    _upload_to_s3(slug, md_content)  # overwrite existing S3 object
+    s3_key = _upload_to_s3(slug, md_content)
 
     with conn.cursor() as cur:
         cur.execute(
             """UPDATE recipes SET title=%s, description=%s, ingredients=%s,
-               steps=%s, notes=%s, tags=%s, updated_at=%s WHERE slug=%s""",
+               steps=%s, notes=%s, tags=%s, s3_key=%s, updated_at=%s WHERE slug=%s""",
             (
                 title,
                 description,
@@ -291,11 +342,13 @@ def update_recipe(slug):
                 json.dumps(steps),
                 notes,
                 json.dumps(tags),
+                s3_key,
                 datetime.now(timezone.utc),
                 slug,
             ),
         )
     conn.commit()
+    s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
     return jsonify(
         {
@@ -319,6 +372,7 @@ def delete_recipe(slug):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM recipes WHERE slug = %s", (slug,))
     conn.commit()
+    s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
     return jsonify(
         {"message": "Recipe deleted", "redirect": url_for("recipes.list_recipes")}
@@ -386,6 +440,7 @@ def recipe_from_chat():
             ),
         )
     conn.commit()
+    s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
 
     return (
@@ -533,6 +588,7 @@ def upload_recipe():
             ),
         )
     conn.commit()
+    s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
 
     return redirect(url_for("recipes.view_recipe", slug=slug))
