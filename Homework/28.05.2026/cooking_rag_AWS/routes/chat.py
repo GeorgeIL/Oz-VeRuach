@@ -169,25 +169,3 @@ def clear_history():
         cur.execute("DELETE FROM messages WHERE conversation_id = %s", (conv_id,))
     conn.commit()
     return jsonify({"message": "Conversation history cleared"})
-
-
-@chat_bp.route("/reload-index", methods=["POST"])
-@chat_bp.route("/refresh-index", methods=["POST"])
-@login_required
-def reload_index():
-    result = rag.sync_knowledge_base()
-    if result["ok"]:
-        payload = {"message": result["message"]}
-        if result.get("job_ids"):
-            payload["job_ids"] = result["job_ids"]
-        if result.get("error"):
-            payload["warning"] = result["error"]
-        return jsonify(payload)
-    return (
-        jsonify(
-            {
-                "error": result.get("error") or result["message"],
-            }
-        ),
-        503,
-    )

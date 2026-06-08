@@ -85,22 +85,25 @@ function appendMessage(role, content) {
   const div = document.createElement("div");
   div.className = `message message--${role}`;
 
-  const contentHtml =
-    role === "assistant"
-      ? typeof marked !== "undefined"
-        ? marked.parse(content)
-        : escapeHtml(content)
-      : escapeHtml(content);
+  if (role === "assistant") {
+    div.innerHTML = `
+      <div class="message-bubble">
+        <div class="message-content"></div>
+      </div>
+      <span class="message-role">👨‍🍳 Chef AI</span>
+    `;
+    container.appendChild(div);
+    mountAssistantContent(div, content);
+  } else {
+    div.innerHTML = `
+      <div class="message-bubble">
+        <div class="message-content">${escapeHtml(content)}</div>
+      </div>
+      <span class="message-role">👤 You</span>
+    `;
+    container.appendChild(div);
+  }
 
-  div.innerHTML = `
-    <div class="message-bubble">
-      <div class="message-content">${contentHtml}</div>
-    </div>
-    <span class="message-role">${role === "user" ? "👤 You" : "👨‍🍳 Chef AI"}</span>
-  `;
-  container.appendChild(div);
-  // Detect recipe-json blocks and attach "Add to Cookbook" buttons
-  if (role === "assistant") attachRecipeButtons(div);
   scrollToBottom();
   return div;
 }
@@ -123,32 +126,151 @@ function removeThinking(id) {
 
 /* ── AI recipe save ─────────────────────────────────────────────────────────── */
 
-/**
- * Scan an assistant message div for recipe-json code blocks.
- * When found: hide the raw JSON block and inject an "Add to Cookbook" button.
- */
-function attachRecipeButtons(div) {
-  div.querySelectorAll("code.language-recipe-json").forEach((code) => {
-    let data;
+const SAVED_RECIPES_STORAGE_KEY = "chefAiSavedRecipes";
+const RECIPE_FENCE_RE = /```(?:recipe-json|json)\s*\n?([\s\S]*?)```/gi;
+
+function getSavedRecipeKeys() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(SAVED_RECIPES_STORAGE_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function markRecipeSaved(data) {
+  const keys = getSavedRecipeKeys();
+  keys.add(recipeFingerprint(data));
+  localStorage.setItem(SAVED_RECIPES_STORAGE_KEY, JSON.stringify([...keys]));
+}
+
+function isRecipeSaved(data) {
+  return getSavedRecipeKeys().has(recipeFingerprint(data));
+}
+
+function recipeFingerprint(data) {
+  const title = String(data?.title || "")
+    .trim()
+    .toLowerCase();
+  const ingredients = (data?.ingredients || [])
+    .map((item) => String(item).trim().toLowerCase())
+    .join("|");
+  return `${title}::${ingredients.slice(0, 240)}`;
+}
+
+function isValidRecipeData(data) {
+  return (
+    data &&
+    typeof data === "object" &&
+    String(data.title || "").trim() &&
+    Array.isArray(data.ingredients) &&
+    data.ingredients.length > 0 &&
+    Array.isArray(data.steps) &&
+    data.steps.length > 0
+  );
+}
+
+function extractRecipeJsonBlocks(content) {
+  const blocks = [];
+  let display = content || "";
+
+  RECIPE_FENCE_RE.lastIndex = 0;
+  let match;
+  while ((match = RECIPE_FENCE_RE.exec(content)) !== null) {
     try {
-      data = JSON.parse(code.textContent);
+      const data = JSON.parse(match[1].trim());
+      if (isValidRecipeData(data)) {
+        blocks.push(data);
+      }
     } catch {
-      return; // Not valid JSON - skip silently
+      /* ignore invalid JSON fences */
+    }
+  }
+
+  RECIPE_FENCE_RE.lastIndex = 0;
+  display = display.replace(RECIPE_FENCE_RE, "").trim();
+  return { display, blocks };
+}
+
+function extractRecipeBlocksFromDom(div) {
+  const blocks = [];
+  div.querySelectorAll("pre code").forEach((code) => {
+    const className = code.className || "";
+    if (
+      !className.includes("language-recipe-json") &&
+      !className.includes("language-json")
+    ) {
+      return;
+    }
+    try {
+      const data = JSON.parse(code.textContent.trim());
+      if (isValidRecipeData(data)) {
+        blocks.push(data);
+      }
+    } catch {
+      /* ignore */
+    }
+  });
+  return blocks;
+}
+
+function createSavedRecipeLabel() {
+  const label = document.createElement("span");
+  label.className = "recipe-saved-label";
+  label.textContent = "✅ Added to your cookbook";
+  return label;
+}
+
+function mountAssistantContent(messageDiv, rawContent) {
+  const contentEl = messageDiv.querySelector(".message-content");
+  if (!contentEl) return;
+
+  const { display, blocks } = extractRecipeJsonBlocks(rawContent);
+  contentEl.innerHTML =
+    typeof marked !== "undefined"
+      ? marked.parse(display || "")
+      : escapeHtml(display || "");
+  attachRecipeButtons(messageDiv, blocks);
+}
+
+/**
+ * Scan an assistant message for recipe JSON and inject save buttons.
+ */
+function attachRecipeButtons(div, recipeBlocks = []) {
+  if (div.dataset.recipeButtonsDone === "true") return;
+
+  const bubble = div.querySelector(".message-bubble");
+  if (!bubble) return;
+
+  const blocks =
+    recipeBlocks.length > 0 ? recipeBlocks : extractRecipeBlocksFromDom(div);
+
+  blocks.forEach((data) => {
+    if (!isValidRecipeData(data)) return;
+
+    if (isRecipeSaved(data)) {
+      if (!bubble.nextElementSibling?.classList.contains("recipe-saved-label")) {
+        bubble.after(createSavedRecipeLabel());
+      }
+      return;
     }
 
-    // Hide the raw JSON <pre> block so users don't see it
-    const pre = code.closest("pre");
-    if (pre) pre.style.display = "none";
+    if (bubble.nextElementSibling?.classList.contains("btn-add-recipe")) {
+      return;
+    }
 
-    // Build the save button and place it below the message bubble
+    div.querySelectorAll("pre code.language-recipe-json, pre code.language-json").forEach((code) => {
+      const pre = code.closest("pre");
+      if (pre) pre.style.display = "none";
+    });
+
     const btn = document.createElement("button");
     btn.className = "btn-add-recipe";
     btn.innerHTML = "📥 Add to My Cookbook";
     btn.onclick = () => saveAiRecipe(data, btn);
-
-    const bubble = div.querySelector(".message-bubble");
-    if (bubble) bubble.after(btn);
+    bubble.after(btn);
   });
+
+  div.dataset.recipeButtonsDone = "true";
 }
 
 /**
@@ -165,8 +287,9 @@ async function saveAiRecipe(data, btn) {
     });
     const result = await resp.json();
     if (resp.ok) {
-      btn.textContent = "✅ Saved! Opening...";
-      btn.style.background = "var(--success, #2d6a4f)";
+      markRecipeSaved(data);
+      const label = createSavedRecipeLabel();
+      btn.replaceWith(label);
       setTimeout(() => window.open(result.redirect, "_blank"), 700);
     } else {
       btn.disabled = false;
@@ -180,23 +303,15 @@ async function saveAiRecipe(data, btn) {
   }
 }
 
-/* ── Index / history controls ────────────────────────────────────────────────── */
-
-async function refreshIndex() {
-  const resp = await fetch("/chat/refresh-index", { method: "POST" });
-  const data = await resp.json();
-  if (resp.ok) {
-    alert(data.warning ? `${data.message}\n\n${data.warning}` : data.message);
-    window.location.reload();
-    return;
-  }
-  alert(data.error || "Failed to refresh index");
-}
+/* ── History controls ────────────────────────────────────────────────────────── */
 
 async function clearHistory() {
   if (!confirm("Clear all conversation history?")) return;
   const resp = await fetch("/chat/clear", { method: "POST" });
-  if (resp.ok) window.location.reload();
+  if (resp.ok) {
+    localStorage.removeItem(SAVED_RECIPES_STORAGE_KEY);
+    window.location.reload();
+  }
 }
 
 /* ── Utilities ───────────────────────────────────────────────────────────────── */

@@ -63,9 +63,6 @@
             ⚠ {{ index_error or 'Index not ready' }}
           </div>
           {% endif %}
-          <button class="btn-secondary btn-sm mt-8" onclick="refreshIndex()">
-            🔄 Refresh index
-          </button>
         </div>
       </div>
 
@@ -163,13 +160,11 @@
       params.get("q"),
     );
   }
-  // Render any existing assistant messages as markdown
-  document.querySelectorAll('[data-markdown="true"]').forEach((el) => {
-    el.innerHTML = marked.parse(el.textContent.trim());
-  });
-  // Attach "Add to Cookbook" buttons to any AI-generated recipes in history
+  // Render existing assistant messages and attach recipe save buttons
   document.querySelectorAll(".message--assistant").forEach((div) => {
-    attachRecipeButtons(div);
+    const contentEl = div.querySelector(".message-content[data-markdown='true']");
+    if (!contentEl) return;
+    mountAssistantContent(div, contentEl.textContent.trim());
   });
   // Scroll to bottom
   scrollToBottom();

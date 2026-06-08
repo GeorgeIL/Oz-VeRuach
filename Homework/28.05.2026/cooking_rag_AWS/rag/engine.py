@@ -53,7 +53,8 @@ Do NOT include the recipe-json block in ANY of these situations:
 - You are adapting or tweaking an existing recipe (e.g. "make it vegan") — that is still an existing recipe.
 - The user asked "what can I make" or "show me recipes" — those are recommendations, not creations.
 
-Only append the block when you have fully invented the recipe from scratch with no cookbook source:
+Only append the block when you have fully invented the recipe from scratch with no cookbook source.
+Always use the exact fence label ```recipe-json (not plain ```json), even in follow-up messages when the user asks for another new recipe:
 
 ```recipe-json
 {"title": "Recipe Name", "description": "One sentence description", "ingredients": ["quantity ingredient", "quantity ingredient"], "steps": ["First instruction", "Second instruction"], "notes": "Optional tips, or empty string", "tags": ["tag1", "tag2"]}
