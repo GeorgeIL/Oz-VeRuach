@@ -25,7 +25,7 @@
   </div>
   {% if not select_mode %}
   <div class="page-header-actions">
-    <a href="{{ url_for('recipes.upload_recipe_page') }}" class="btn-secondary">📄 Upload Recipe</a>
+    <button type="button" class="btn-secondary" id="uploadRecipeBtn">📄 Upload Recipe</button>
     <a href="{{ url_for('recipes.new_recipe') }}" class="btn-primary">+ Add Recipe</a>
   </div>
   {% endif %}
@@ -138,10 +138,15 @@
 {% endif %}
 
 {% endif %}
+
+{% include "recipes/_subscription_modal.html" %}
 {% endblock %}
 
 {% block extra_js %}
+<script src="{{ url_for('static', filename='js/subscription.js') }}"></script>
 <script>
+wireUploadRecipeButton("uploadRecipeBtn");
+
 function toggleFav(btn, slug) {
   fetch(`/recipes/${slug}/favorite`, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
     .then(r => r.json())
