@@ -27,6 +27,13 @@ class Config:
     )
     NOVA_MODEL_ID = os.getenv("NOVA_MODEL_ID", "amazon.nova-lite-v1:0")
 
+    # Bedrock Agent (Chef AI chat)
+    BEDROCK_AGENT_ID = os.getenv("BEDROCK_AGENT_ID", "")
+    BEDROCK_AGENT_ALIAS_ID = os.getenv("BEDROCK_AGENT_ALIAS_ID", "")
+    AGENT_TOOL_SECRET = os.getenv("AGENT_TOOL_SECRET", "")
+    APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:5000")
+    METEOSOURCE_API_KEY = os.getenv("METEOSOURCE_API_KEY", "")
+
     # S3
     S3_BUCKET = os.getenv("S3_BUCKET_NAME")
     S3_RECIPES_PREFIX = os.getenv("S3_RECIPES_PREFIX", "recipes/")

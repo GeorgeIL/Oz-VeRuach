@@ -23,6 +23,14 @@ if not Config.BUDDY_EMAIL_LAMBDA_NAME:
     print(
         "WARNING: BUDDY_EMAIL_LAMBDA_NAME is not set — buddy recipe emails will fail."
     )
+if not Config.BEDROCK_AGENT_ID or not Config.BEDROCK_AGENT_ALIAS_ID:
+    print(
+        "WARNING: BEDROCK_AGENT_ID / BEDROCK_AGENT_ALIAS_ID not set — Chef AI chat will fail."
+    )
+if not Config.AGENT_TOOL_SECRET:
+    print(
+        "WARNING: AGENT_TOOL_SECRET is not set — agent share-recipe tool endpoint will reject calls."
+    )
 if not Config.GEMINI_API_KEY:
     print(
         "WARNING: GEMINI_API_KEY is not set — async recipe image generation is disabled."

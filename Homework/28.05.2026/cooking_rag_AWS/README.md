@@ -226,6 +226,87 @@ database (the `CREATE TABLE IF NOT EXISTS` block is safe to re-run).
 | Sidebar count looks like user recipes only | Old UI showed RDS count as “chunks” | After this update, the sidebar shows `catalog + yours` from S3 and RDS |
 | Retrieval works but sync fails | IAM missing `bedrock-agent:StartIngestionJob` | Ensure the EC2 role includes Bedrock agent permissions |
 
+### 3b - Bedrock Agent (Chef AI chat)
+
+Chef AI chat uses a **Bedrock Agent** (not direct Converse API). Extend your existing
+test agent as follows:
+
+1. **Attach the cooking Knowledge Base** (`BEDROCK_KB_ID`) to the agent.
+2. **Replace the action group functions** on the same Lambda (`lmbda.py` at project root):
+   - `SuggestDishForTimeAndWeather` — params: `location` (required), `meal_hint` (optional)
+   - `ShareRecipeWithBuddy` — params: `buddy_name`, `recipe_title`, `recipe_body`
+3. **Update agent instructions** (example themes):
+   - Answer cookbook questions from the attached KB.
+   - Call `SuggestDishForTimeAndWeather` when the user asks what to cook based on time, weather, or location (Meteosource `place_id`, e.g. `paris`).
+   - Call `ShareRecipeWithBuddy` when the user asks to email/share a recipe to a buddy by name; use recipe text from the current conversation.
+   - Valid buddy names are in `promptSessionAttributes.buddy_names`.
+4. Note the **Agent ID** and **Alias ID** from the Bedrock console.
+
+#### Action Lambda environment
+
+Deploy [`lmbda.py`](lmbda.py) to the Lambda already wired to your agent action group.
+
+**Important:** In AWS the handler is usually `dummy_lambda.lambda_handler`, not `lmbda.lambda_handler`.
+Use the deploy script (packages `lmbda.py` as `dummy_lambda.py`):
+
+```bash
+chmod +x scripts/deploy_agent_lambda.sh
+./scripts/deploy_agent_lambda.sh action_group_quick_start_38hbb-hwq2r
+```
+
+Or manually: copy `lmbda.py` → `dummy_lambda.py`, zip, upload via console or `aws lambda update-function-code`.
+
+```
+BEDROCK_KB_ID=<same as Flask>
+METEOSOURCE_API_KEY=<your meteosource key>
+FLASK_TOOL_URL=https://<your-app-host>/chat/agent/share-recipe
+AGENT_TOOL_SECRET=<same random secret as Flask>
+AWS_REGION=us-east-1
+```
+
+Lambda IAM needs `bedrock:Retrieve` on the knowledge base ARN.
+
+#### Flask / EC2 environment
+
+Add to `.env` (local) and `env.ec2` (production):
+
+```
+BEDROCK_AGENT_ID=<agent id from console>
+BEDROCK_AGENT_ALIAS_ID=<alias id from console>
+AGENT_TOOL_SECRET=<shared secret with action Lambda>
+APP_BASE_URL=http://127.0.0.1:5001
+METEOSOURCE_API_KEY=<optional; used by Lambda, not Flask>
+```
+
+EC2 IAM also needs `bedrock:InvokeAgent` on `arn:aws:bedrock:us-east-1:<account>:agent-alias/<agent-id>/<alias-id>`.
+
+Flask passes `user_id`, pantry, buddy names, and authoritative recipe markdown via
+agent session attributes on each `/chat/ask` request. **Share-to-buddy requests**
+(e.g. "send this recipe to Sarah") are handled directly in Flask using your saved
+buddies and the last recipe in chat — no agent tool call required. The share tool
+Lambda + `POST /chat/agent/share-recipe` path remains available if you add
+`ShareRecipeWithBuddy` to the action group later.
+
+#### Verification
+
+| User message | Expected |
+| ------------ | -------- |
+| What should I cook in Paris right now? | Agent calls weather/time tool → KB-grounded dish names |
+| Tell me about Agua Fresca | KB + injected authoritative recipe context |
+| Email that recipe to Sarah | Agent calls share tool → email queued via SES |
+
+#### Troubleshooting
+
+| Symptom | Cause | Fix |
+| ------- | ----- | --- |
+| CloudWatch shows `Unknown function: GetTime` | Old code still deployed on the action Lambda | Run `./scripts/deploy_agent_lambda.sh <function-name>` — local edits to `lmbda.py` do not reach AWS until redeployed |
+| "Sorry, I cannot provide the current time" | Agent received `Unknown function: GetTime` from Lambda | Same as above — redeploy Lambda |
+| Time works but Paris recipe suggestion fails | Agent calls `GetTime` instead of `GetWeather` / `SuggestDishForTimeAndWeather` | Update **agent instructions**: for recipe suggestions by location, call `GetWeather` or `SuggestDishForTimeAndWeather` with `location=paris` (not `GetTime`) |
+| App says "I can only provide the current date and time" but AWS console test works | Stale **Bedrock agent session** — app used `conversation.id` as `sessionId`; failed tool calls stay in agent memory even after Clear history | Fixed: app uses `conversations.agent_session_id` (rotated on clear + new column on upgrade). Restart Flask after deploy, or click **Clear history** once |
+| Lambda `SuggestDishForTimeAndWeather` returns no recipes | Missing `BEDROCK_KB_ID` env on action Lambda or missing `bedrock:Retrieve` IAM | Set env var and add retrieve permission on the Lambda role |
+
+**IAM note:** If CloudWatch shows the Lambda executing and returning HTTP 200, IAM is fine for invocation. Admin console access is separate from the IAM user/role your Flask app uses locally (`AWS_ACCESS_KEY_ID` in `.env`) or on EC2 (instance role).
+
 ### 4 - IAM role for EC2
 
 ```bash
@@ -324,6 +405,11 @@ AWS_REGION=us-east-1
 BEDROCK_KB_ID=<your_kb_id>
 BEDROCK_KB_DS_ID=<your_ds_id>
 BEDROCK_KB_SYNC_ALL=true
+BEDROCK_AGENT_ID=<your_agent_id>
+BEDROCK_AGENT_ALIAS_ID=<your_agent_alias_id>
+AGENT_TOOL_SECRET=<shared_secret_with_action_lambda>
+APP_BASE_URL=https://<your-ec2-host>:5001
+METEOSOURCE_API_KEY=<your_meteosource_key>
 # Optional: cooking buddies email via Lambda + SES
 # BUDDY_EMAIL_LAMBDA_NAME=cooking-rag-buddy-email
 # SES_FROM_EMAIL=you@verified-domain.com
@@ -483,6 +569,11 @@ AWS_SECRET_ACCESS_KEY=<your_iam_user_secret_key>
 BEDROCK_KB_ID=<your_kb_id>
 BEDROCK_KB_DS_ID=<your_ds_id>
 BEDROCK_KB_SYNC_ALL=true
+BEDROCK_AGENT_ID=<your_agent_id>
+BEDROCK_AGENT_ALIAS_ID=<your_agent_alias_id>
+AGENT_TOOL_SECRET=<shared_secret_with_action_lambda>
+APP_BASE_URL=http://127.0.0.1:5001
+METEOSOURCE_API_KEY=<your_meteosource_key>
 S3_BUCKET_NAME=<your_bucket_name>
 S3_RECIPES_PREFIX=recipes/
 RDS_HOST=<your_cluster_writer_endpoint>
@@ -534,17 +625,20 @@ cooking_rag_AWS/
 ├── .dockerignore
 ├── migrations/
 │   └── schema.sql          # CREATE TABLE IF NOT EXISTS for all tables
+├── lmbda.py                # Bedrock Agent action group Lambda (time/weather + share tools)
 ├── rag/
 │   ├── __init__.py
 │   └── engine.py           # retrieve_chunks(), ask_chef(), sync_knowledge_base(), get_index_status()
 ├── routes/
 │   ├── __init__.py
 │   ├── auth.py
-│   ├── chat.py
+│   ├── chat.py             # invoke_agent chat + /agent/share-recipe tool endpoint
 │   ├── recipes.py
 │   ├── pantry.py
 │   └── buddies.py
 ├── services/
+│   ├── bedrock_agent.py    # invoke_chef_agent() wrapper
+│   ├── recipe_lookup.py    # Authoritative S3 recipe context for chat
 │   ├── s3_recipes.py         # S3 recipe index + image URL resolution
 │   └── recipe_images.py      # Gemini generation, S3 upload, image overrides
 ├── lambda/

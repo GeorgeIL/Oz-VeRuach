@@ -55,8 +55,9 @@ CREATE INDEX IF NOT EXISTS favorites_user_idx     ON favorites(user_id);
 -- ── Chat (one conversation per user, messages ordered by time) ────────────────
 
 CREATE TABLE IF NOT EXISTS conversations (
-    id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    agent_session_id UUID NOT NULL DEFAULT gen_random_uuid()
 );
 
 CREATE TABLE IF NOT EXISTS messages (

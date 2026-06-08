@@ -129,6 +129,12 @@ def init_schema():
     try:
         with conn.cursor() as cur:
             cur.execute(sql)
+            cur.execute(
+                """
+                ALTER TABLE conversations
+                ADD COLUMN IF NOT EXISTS agent_session_id UUID NOT NULL DEFAULT gen_random_uuid()
+                """
+            )
         conn.commit()
     finally:
         _get_pool().putconn(conn)

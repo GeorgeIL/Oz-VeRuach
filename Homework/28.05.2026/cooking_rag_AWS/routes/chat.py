@@ -1,10 +1,13 @@
+import json
+
+import boto3
 from flask import Blueprint, render_template, request, jsonify
 
 from auth_utils import get_current_user, login_required
 from config import Config
 from db import get_db
 from rag import engine as rag
-from services import recipe_lookup
+from services import bedrock_agent, buddy_share, recipe_lookup
 
 chat_bp = Blueprint("chat", __name__, url_prefix="/chat")
 
@@ -12,8 +15,8 @@ chat_bp = Blueprint("chat", __name__, url_prefix="/chat")
 # ── Conversation helpers ──────────────────────────────────────────────────────
 
 
-def _get_or_create_conversation(conn, user_id: str) -> str:
-    """Return conversation_id (str UUID) for the user, creating one if needed."""
+def _get_or_create_conversation(conn, user_id: str) -> dict:
+    """Return conversation row (id + agent_session_id), creating one if needed."""
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO conversations (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING",
@@ -21,10 +24,130 @@ def _get_or_create_conversation(conn, user_id: str) -> str:
         )
         conn.commit()
         cur.execute(
-            "SELECT id::text AS id FROM conversations WHERE user_id = %s", (user_id,)
+            """
+            SELECT id::text AS id, agent_session_id::text AS agent_session_id
+            FROM conversations
+            WHERE user_id = %s
+            """,
+            (user_id,),
         )
         row = cur.fetchone()
-    return row["id"]
+    return dict(row)
+
+
+def _reset_agent_session(conn, conversation_id: str) -> str:
+    """Rotate Bedrock agent session (clears poisoned tool/memory state)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE conversations
+            SET agent_session_id = gen_random_uuid()
+            WHERE id = %s
+            RETURNING agent_session_id::text AS agent_session_id
+            """,
+            (conversation_id,),
+        )
+        row = cur.fetchone()
+    conn.commit()
+    return row["agent_session_id"]
+
+
+def _fetch_buddy_names(conn, user_id: str) -> list[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT name FROM cooking_buddies
+            WHERE user_id = %s
+            ORDER BY name
+            """,
+            (user_id,),
+        )
+        return [row["name"] for row in cur.fetchall()]
+
+
+def _build_email_context_from_body(recipe_title: str, recipe_body: str) -> str:
+    title = recipe_title.strip()
+    body = recipe_body.strip()
+    if body.lower().startswith("#"):
+        return body
+    return f"# {title}\n\n{body}"
+
+
+def _send_recipe_email_to_buddy(
+    conn,
+    *,
+    user_id: str,
+    sender_name: str,
+    buddy_name: str,
+    recipe_title: str,
+    recipe_body: str,
+) -> tuple[bool, str]:
+    if not Config.BUDDY_EMAIL_LAMBDA_NAME:
+        return False, "Email service is not configured"
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id::text AS id, name, email
+            FROM cooking_buddies
+            WHERE user_id = %s AND LOWER(name) = LOWER(%s)
+            LIMIT 1
+            """,
+            (user_id, buddy_name.strip()),
+        )
+        buddy = cur.fetchone()
+
+    if not buddy:
+        return False, f"No cooking buddy named '{buddy_name}' was found"
+
+    context = _build_email_context_from_body(recipe_title, recipe_body)
+    subject = f"Recipe: {recipe_title.strip()}"
+    payload = {
+        "sender_name": sender_name or "A Smart Cookbook user",
+        "subject": subject,
+        "context": context,
+        "buddies": [{"name": buddy["name"], "email": buddy["email"]}],
+    }
+
+    try:
+        client = boto3.client("lambda", region_name=Config.AWS_REGION)
+        client.invoke(
+            FunctionName=Config.BUDDY_EMAIL_LAMBDA_NAME,
+            InvocationType="Event",
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+    except Exception as exc:
+        return False, f"Failed to send email: {exc}"
+
+    return True, f"Email queued for {buddy['name']} ({buddy['email']})"
+
+
+def _chef_error_response(exc: Exception):
+    err_str = str(exc)
+    if "ThrottlingException" in err_str or "throttling" in err_str.lower():
+        return (
+            jsonify(
+                {
+                    "error": "Chef AI is busy right now — please wait a few seconds and try again."
+                }
+            ),
+            429,
+        )
+    if "AccessDeniedException" in err_str:
+        return (
+            jsonify(
+                {
+                    "error": "Chef AI access denied. Check AWS credentials, agent ID, and IAM permissions."
+                }
+            ),
+            503,
+        )
+    if "ValidationException" in err_str:
+        return (
+            jsonify({"error": f"Chef AI rejected the request: {err_str[:200]}"}),
+            400,
+        )
+    return jsonify({"error": f"Chef AI error: {err_str[:200]}"}), 500
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -35,7 +158,8 @@ def _get_or_create_conversation(conn, user_id: str) -> str:
 def chat_page():
     user = get_current_user()
     conn = get_db()
-    conv_id = _get_or_create_conversation(conn, user["sub"])
+    conv = _get_or_create_conversation(conn, user["sub"])
+    conv_id = conv["id"]
     with conn.cursor() as cur:
         cur.execute(
             "SELECT role, content FROM ("
@@ -68,15 +192,24 @@ def ask():
     if not question:
         return jsonify({"error": "No question provided"}), 400
 
+    if not bedrock_agent.is_agent_configured():
+        return (
+            jsonify(
+                {
+                    "error": "Chef AI agent is not configured. Set BEDROCK_AGENT_ID and BEDROCK_AGENT_ALIAS_ID."
+                }
+            ),
+            503,
+        )
+
     conn = get_db()
 
-    # Fetch user pantry
     with conn.cursor() as cur:
         cur.execute("SELECT ingredient FROM pantry WHERE user_id = %s", (user["sub"],))
         pantry = [r["ingredient"] for r in cur.fetchall()]
 
-    # Get (or create) conversation and fetch recent history
-    conv_id = _get_or_create_conversation(conn, user["sub"])
+    conv = _get_or_create_conversation(conn, user["sub"])
+    conv_id = conv["id"]
     with conn.cursor() as cur:
         cur.execute(
             "SELECT role, content FROM ("
@@ -90,68 +223,73 @@ def ask():
 
     active_slugs = recipe_lookup.resolve_active_recipe_slugs(question, recent, conn)
     authoritative = recipe_lookup.build_authoritative_context(active_slugs, conn)
-    retrieval_query = recipe_lookup.build_retrieval_query(question, recent, conn)
-    recipe_chunks = rag.retrieve_chunks(retrieval_query, Config.TOP_K)
+    buddy_names = _fetch_buddy_names(conn, user["sub"])
 
-    with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) AS cnt FROM recipes")
-        user_count = cur.fetchone()["cnt"]
+    sender_name = user.get("username") or "A Smart Cookbook user"
+    share_buddy = buddy_share.detect_buddy_for_share(question, buddy_names)
+    if share_buddy:
+        recipe = buddy_share.extract_recipe_from_history(recent, conn)
+        if not recipe:
+            answer = (
+                "I couldn't find a recipe in our conversation to send. "
+                "Ask about a recipe first, then ask me to share it with your buddy."
+            )
+        else:
+            recipe_title, recipe_body = recipe
+            ok, message = _send_recipe_email_to_buddy(
+                conn,
+                user_id=user["sub"],
+                sender_name=sender_name,
+                buddy_name=share_buddy,
+                recipe_title=recipe_title,
+                recipe_body=recipe_body,
+            )
+            if ok:
+                answer = (
+                    f"Done! {message} "
+                    f"I sent **{recipe_title}** to {share_buddy}."
+                )
+            else:
+                answer = f"I couldn't send the email: {message}"
 
-    index_status = rag.get_index_status(user_count)
-    catalog_count = index_status["catalog_count"]
-    kb_note = (
-        f"[Catalog note: The knowledge base contains {catalog_count} built-in catalog "
-        f"recipe(s) plus {user_count} user-added recipe(s). "
-        f"Use authoritative entries when present; otherwise rely on retrieved excerpts.]"
-    )
-    context_chunks = authoritative + [kb_note] + recipe_chunks
-    has_authoritative = bool(authoritative)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO messages (conversation_id, role, content, created_at)"
+                " VALUES (%s, %s, %s, clock_timestamp())",
+                (conv_id, "user", question),
+            )
+            cur.execute(
+                "INSERT INTO messages (conversation_id, role, content, created_at)"
+                " VALUES (%s, %s, %s, clock_timestamp())",
+                (conv_id, "assistant", answer),
+            )
+        conn.commit()
+        return jsonify({"answer": answer, "sources": 0})
 
-    # Call Nova Lite via Bedrock
+    session_attributes = {
+        "user_id": user["sub"],
+        "sender_name": sender_name,
+        "username": user.get("username") or "",
+    }
+    prompt_attributes = {
+        "pantry": ", ".join(pantry) if pantry else "none listed",
+        "buddy_names": ", ".join(buddy_names) if buddy_names else "none added yet",
+        "active_recipe": "\n\n".join(authoritative) if authoritative else "",
+    }
+
     try:
-        answer = rag.ask_chef(
+        answer = bedrock_agent.invoke_chef_agent(
             question,
-            context_chunks,
-            recent,
-            pantry,
-            has_authoritative_context=has_authoritative,
+            conv["agent_session_id"],
+            session_attributes,
+            prompt_attributes,
         )
     except Exception as exc:
         import traceback
 
-        traceback.print_exc()  # prints full stack trace to server console
-        err_str = str(exc)
-        if "ThrottlingException" in err_str or "throttling" in err_str.lower():
-            return (
-                jsonify(
-                    {
-                        "error": "Chef AI is busy right now — please wait a few seconds and try again."
-                    }
-                ),
-                429,
-            )
-        if "AccessDeniedException" in err_str:
-            return (
-                jsonify(
-                    {
-                        "error": "Chef AI access denied. Check AWS credentials and Bedrock model access."
-                    }
-                ),
-                503,
-            )
-        if "ValidationException" in err_str:
-            # Message format rejected by Converse API — clear history so next request starts fresh
-            return (
-                jsonify(
-                    {"error": f"Chef AI rejected the request format: {err_str[:200]}"}
-                ),
-                400,
-            )
-        return jsonify({"error": f"Chef AI error: {err_str[:200]}"}), 500
+        traceback.print_exc()
+        return _chef_error_response(exc)
 
-    # Persist both messages to RDS.
-    # Use clock_timestamp() (not NOW()) so each INSERT gets a distinct timestamp
-    # even within the same transaction — guarantees correct ordering on reload.
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO messages (conversation_id, role, content, created_at)"
@@ -165,7 +303,45 @@ def ask():
         )
     conn.commit()
 
-    return jsonify({"answer": answer, "sources": len(recipe_chunks)})
+    return jsonify({"answer": answer, "sources": 0})
+
+
+@chat_bp.route("/agent/share-recipe", methods=["POST"])
+def agent_share_recipe():
+    """Secured endpoint invoked by the Bedrock action Lambda."""
+    secret = request.headers.get("X-Agent-Tool-Secret", "")
+    if not Config.AGENT_TOOL_SECRET or secret != Config.AGENT_TOOL_SECRET:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    user_id = (data.get("user_id") or "").strip()
+    sender_name = (data.get("sender_name") or "A Smart Cookbook user").strip()
+    buddy_name = (data.get("buddy_name") or "").strip()
+    recipe_title = (data.get("recipe_title") or "").strip()
+    recipe_body = (data.get("recipe_body") or "").strip()
+
+    if not user_id:
+        return jsonify({"ok": False, "error": "user_id is required"}), 400
+    if not buddy_name:
+        return jsonify({"ok": False, "error": "buddy_name is required"}), 400
+    if not recipe_title:
+        return jsonify({"ok": False, "error": "recipe_title is required"}), 400
+    if not recipe_body:
+        return jsonify({"ok": False, "error": "recipe_body is required"}), 400
+
+    conn = get_db()
+    ok, message = _send_recipe_email_to_buddy(
+        conn,
+        user_id=user_id,
+        sender_name=sender_name,
+        buddy_name=buddy_name,
+        recipe_title=recipe_title,
+        recipe_body=recipe_body,
+    )
+    if not ok:
+        return jsonify({"ok": False, "error": message}), 400
+
+    return jsonify({"ok": True, "message": message})
 
 
 @chat_bp.route("/clear", methods=["POST"])
@@ -173,8 +349,9 @@ def ask():
 def clear_history():
     user = get_current_user()
     conn = get_db()
-    conv_id = _get_or_create_conversation(conn, user["sub"])
+    conv = _get_or_create_conversation(conn, user["sub"])
+    conv_id = conv["id"]
     with conn.cursor() as cur:
         cur.execute("DELETE FROM messages WHERE conversation_id = %s", (conv_id,))
-    conn.commit()
+    _reset_agent_session(conn, conv_id)
     return jsonify({"message": "Conversation history cleared"})
