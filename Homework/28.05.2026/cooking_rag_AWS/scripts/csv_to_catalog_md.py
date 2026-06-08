@@ -89,6 +89,92 @@ def _tags_from_cuisine(cuisine_value: str) -> list[str]:
     return _normalize_tags(parts)
 
 
+_QUANTITY_INGREDIENT_SPLIT_RE = re.compile(
+    r",\s*(?=(?:\d+(?:[./]\d+)?|\d+\s*/|\d+\s-\s*\d+|½|¼|⅓|⅔|¾|⅛|⅜|⅝|⅞)\s)",
+    re.IGNORECASE,
+)
+
+
+def _split_ingredients(text: str) -> list[str]:
+    """Split a CSV ingredient string into one item per line."""
+    text = " ".join(text.split())
+    if not text:
+        return []
+    parts = _QUANTITY_INGREDIENT_SPLIT_RE.split(text)
+    if len(parts) <= 1:
+        return _split_on_commas_outside_parens(text)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _split_on_commas_outside_parens(text: str) -> list[str]:
+    """Split ingredient string on commas not inside parentheses."""
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            piece = "".join(buf).strip()
+            if piece:
+                parts.append(piece)
+            buf = []
+            continue
+        buf.append(ch)
+    piece = "".join(buf).strip()
+    if piece:
+        parts.append(piece)
+    return parts
+
+
+def _parse_ingredients(raw) -> list[str]:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return []
+    if isinstance(raw, list):
+        items: list[str] = []
+        for item in raw:
+            items.extend(_split_ingredients(str(item).strip()))
+        return [part for part in items if part]
+    text = str(raw).strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        parsed = _parse_list_value(raw)
+        if len(parsed) > 1:
+            return parsed
+        if parsed:
+            return _split_ingredients(parsed[0])
+    return _split_ingredients(text)
+
+
+def _parse_directions(raw) -> list[str]:
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return []
+    text = str(raw).strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return []
+
+    if text.startswith("[") and text.endswith("]"):
+        parsed = _parse_list_value(raw)
+        if len(parsed) > 1:
+            return [step for step in parsed if step]
+        if parsed:
+            text = parsed[0]
+
+    steps: list[str] = []
+    for chunk in re.split(r"\n+", text):
+        chunk = " ".join(chunk.split())
+        if not chunk:
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+", chunk):
+            sentence = sentence.strip()
+            if sentence:
+                steps.append(sentence)
+    return steps
+
+
 def _parse_list_value(raw) -> list[str]:
     if raw is None or (isinstance(raw, float) and pd.isna(raw)):
         return []
@@ -165,6 +251,23 @@ def _unique_slug(base_slug: str, used: set[str]) -> str:
     return slug
 
 
+def _wipe_all_catalog_objects(s3, dry_run: bool) -> int:
+    """Remove every object under the catalog prefix (full rebuild)."""
+    deleted = 0
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=CATALOG_PREFIX):
+        for obj in page.get("Contents", []):
+            key = obj.get("Key", "")
+            if not key or key == CATALOG_PREFIX:
+                continue
+            if dry_run:
+                print(f"[dry-run] delete {key}")
+            else:
+                s3.delete_object(Bucket=S3_BUCKET, Key=key)
+            deleted += 1
+    return deleted
+
+
 def _wipe_legacy_catalog_objects(s3, dry_run: bool) -> int:
     """Remove numeric-slug catalog files and summary artifacts."""
     deleted = 0
@@ -208,10 +311,27 @@ def main() -> None:
         action="store_true",
         help="Delete legacy numeric-slug catalog files and old manifest before upload",
     )
+    parser.add_argument(
+        "--wipe-all-catalog",
+        action="store_true",
+        help="Delete ALL objects under recipes/catalog/ before upload (use with --half)",
+    )
+    parser.add_argument(
+        "--half",
+        action="store_true",
+        help="Use every other CSV row (keep indices 0,2,4…; skip 1,3,5…) and save data/recipes_half.csv",
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default="",
+        help="Path to CSV file (default: data/recipes.csv)",
+    )
     args = parser.parse_args()
 
-    if not CSV_PATH.exists():
-        print(f"ERROR: CSV not found at {CSV_PATH}")
+    csv_path = Path(args.csv) if args.csv else CSV_PATH
+    if not csv_path.exists():
+        print(f"ERROR: CSV not found at {csv_path}")
         print("Place your catalog file at data/recipes.csv and run again.")
         sys.exit(1)
 
@@ -219,7 +339,12 @@ def main() -> None:
         print("ERROR: S3_BUCKET_NAME is not set in the environment.")
         sys.exit(1)
 
-    df = pd.read_csv(CSV_PATH)
+    df = pd.read_csv(csv_path)
+    if args.half:
+        df = df.iloc[::2].copy()
+        half_path = csv_path.parent / "recipes_half.csv"
+        df.to_csv(half_path, index=False)
+        print(f"Half dataset: {len(df)} rows (saved to {half_path})")
     if args.limit and args.limit > 0:
         df = df.head(args.limit)
 
@@ -249,6 +374,7 @@ def main() -> None:
     prep_col = _find_column(columns, "prep_time", "preptime", "preparation_time")
     cook_col = _find_column(columns, "cook_time", "cooktime", "cooking_time")
     total_col = _find_column(columns, "total_time", "totaltime")
+    image_col = _find_column(columns, "img_src", "image", "image_url", "photo")
 
     if not title_col:
         print(f"ERROR: Could not find a title/name column in CSV columns: {columns}")
@@ -258,10 +384,19 @@ def main() -> None:
 
     s3 = (
         boto3.client("s3", region_name=AWS_REGION)
-        if not args.dry_run or args.wipe_catalog
+        if not args.dry_run or args.wipe_catalog or args.wipe_all_catalog
         else None
     )
-    if args.wipe_catalog:
+    if args.wipe_all_catalog:
+        if not s3:
+            print("ERROR: Cannot wipe catalog without S3 access.")
+            sys.exit(1)
+        removed = _wipe_all_catalog_objects(s3, dry_run=args.dry_run)
+        if args.dry_run:
+            print(f"[dry-run] Would remove {removed} catalog object(s).")
+        else:
+            print(f"Removed {removed} catalog object(s).")
+    elif args.wipe_catalog:
         if not s3:
             print("ERROR: Cannot wipe catalog without S3 access.")
             sys.exit(1)
@@ -284,8 +419,14 @@ def main() -> None:
         if description.lower() == "nan":
             description = ""
 
-        ingredients = _parse_list_value(row.get(ingredients_col)) if ingredients_col else []
-        steps = _parse_list_value(row.get(steps_col)) if steps_col else []
+        ingredients = _parse_ingredients(row.get(ingredients_col)) if ingredients_col else []
+        steps = _parse_directions(row.get(steps_col)) if steps_col else []
+
+        image_url = ""
+        if image_col:
+            image_url = str(row.get(image_col, "")).strip()
+            if image_url.lower() in {"nan", "none"}:
+                image_url = ""
 
         tags: list[str] = []
         if cuisine_col:
@@ -326,6 +467,7 @@ def main() -> None:
                 "title": title,
                 "tags": tags,
                 "s3_key": key,
+                "image_url": image_url,
             }
         )
 

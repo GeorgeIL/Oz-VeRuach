@@ -120,6 +120,10 @@ print('Schema applied!')
 python3 scripts/csv_to_catalog_md.py --wipe-catalog
 ```
 
+Use `--half --wipe-all-catalog` to rebuild with every other CSV row (~545 recipes) and
+save `data/recipes_half.csv`. Recipe cards show a uniform thumbnail from the CSV
+`img_src` column via `manifest.json`.
+
 This writes `recipes/catalog/{slug}.md` for every CSV row (~1100 files) using the
 **recipe name** from the CSV (not the row index), plus `recipes/catalog/manifest.json`
 for fast title/tag lookup in the app. Tags come from the CSV `cuisine_path` column.

@@ -41,6 +41,17 @@ endblock %} {% block extra_css %}
 </div>
 {% endif %}
 
+{% if recipe.image_url %}
+<div class="recipe-detail-image-wrap">
+  <img
+    class="recipe-detail-image"
+    src="{{ recipe.image_url }}"
+    alt="{{ recipe.title }}"
+    loading="lazy"
+  />
+</div>
+{% endif %}
+
 <article class="recipe-content markdown-body">
   {{ html_content | safe }}
 </article>

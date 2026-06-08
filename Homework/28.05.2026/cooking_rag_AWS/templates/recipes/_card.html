@@ -10,6 +10,17 @@
 
   {% if select_mode %}
   <div class="recipe-card recipe-card--select">
+    {% if recipe.image_url %}
+    <div class="recipe-card-image-wrap">
+      <img
+        class="recipe-card-image"
+        src="{{ recipe.image_url }}"
+        alt="{{ recipe.title }}"
+        loading="lazy"
+        onerror="this.closest('.recipe-card-image-wrap').remove()"
+      />
+    </div>
+    {% endif %}
     <div class="recipe-card-header">
       <h2 class="recipe-card-title">{{ recipe.title }}</h2>
       {% if recipe.author_username %}
@@ -40,7 +51,18 @@
     </div>
   </div>
   {% else %}
-  <a class="recipe-card" href="{{ url_for('recipes.view_recipe', slug=recipe.slug) }}">
+  <a class="recipe-card{% if recipe.image_url %} recipe-card--with-image{% endif %}" href="{{ url_for('recipes.view_recipe', slug=recipe.slug) }}">
+    {% if recipe.image_url %}
+    <div class="recipe-card-image-wrap">
+      <img
+        class="recipe-card-image"
+        src="{{ recipe.image_url }}"
+        alt="{{ recipe.title }}"
+        loading="lazy"
+        onerror="this.closest('.recipe-card-image-wrap').remove()"
+      />
+    </div>
+    {% endif %}
     <div class="recipe-card-header">
       <h2 class="recipe-card-title">{{ recipe.title }}</h2>
       {% if recipe.author_username %}

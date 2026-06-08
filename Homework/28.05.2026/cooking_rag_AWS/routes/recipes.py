@@ -243,6 +243,7 @@ def view_recipe(slug):
 
     if recipe:
         recipe = _row_to_recipe(recipe)
+        recipe["image_url"] = s3_recipes.get_image_url(slug)
         md_content = _recipe_to_md(
             recipe["title"],
             recipe["description"],
@@ -269,6 +270,7 @@ def view_recipe(slug):
 
     title = s3_recipes.title_for_key(catalog_key, md_content)
     tags = s3_recipes.parse_tags(md_content)
+    image_url = s3_recipes.get_image_url(slug)
     html_content = _render_md(md_content)
     recipe = {
         "id": "",
@@ -276,6 +278,7 @@ def view_recipe(slug):
         "title": title,
         "description": "",
         "tags": tags,
+        "image_url": image_url,
         "author_username": None,
         "author_id": None,
         "created_at": None,

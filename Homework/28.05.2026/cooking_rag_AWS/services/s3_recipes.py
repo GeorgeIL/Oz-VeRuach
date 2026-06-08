@@ -32,6 +32,7 @@ class RecipeIndexEntry(TypedDict):
     source: str
     description: str
     tags: list
+    image_url: str | None
     author_username: str | None
     created_at: datetime | None
     last_modified: datetime | None
@@ -123,6 +124,7 @@ def _load_catalog_manifest() -> dict[str, dict]:
                 "title": item.get("title") or _title_from_slug(slug),
                 "tags": tags,
                 "s3_key": item.get("s3_key") or catalog_s3_key(slug),
+                "image_url": (item.get("image_url") or "").strip() or None,
             }
     except Exception:
         pass
@@ -130,6 +132,12 @@ def _load_catalog_manifest() -> dict[str, dict]:
     _manifest_cache = lookup
     _manifest_expires_at = now + _INDEX_TTL_SECONDS
     return lookup
+
+
+def get_image_url(slug: str) -> str | None:
+    manifest = _load_catalog_manifest()
+    item = manifest.get(slug, {})
+    return item.get("image_url")
 
 
 def _fetch_md_header(key: str) -> str:
@@ -181,6 +189,7 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
 
     rds_meta = _load_rds_meta(conn)
     manifest = _load_catalog_manifest()
+    manifest_slugs = set(manifest.keys()) if manifest else set()
     entries: list[RecipeIndexEntry] = []
     indexed_keys: set[str] = set()
     catalog_prefix = f"{Config.S3_RECIPES_PREFIX}{_CATALOG_PREFIX}"
@@ -195,6 +204,9 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                 continue
 
             slug = _slug_from_key(key)
+            if manifest_slugs and slug not in manifest_slugs:
+                continue
+
             rds = rds_meta.get(slug, {})
             manifest_item = manifest.get(slug, {})
 
@@ -204,6 +216,7 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                 or _title_from_slug(slug)
             )
             tags = rds.get("tags") or manifest_item.get("tags") or []
+            image_url = manifest_item.get("image_url")
             if not rds.get("tags") and not manifest_item.get("tags"):
                 header = _fetch_md_header(key)
                 if header:
@@ -222,6 +235,7 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                     "source": source,
                     "description": rds.get("description", ""),
                     "tags": tags,
+                    "image_url": image_url,
                     "author_username": rds.get("author_username"),
                     "created_at": rds.get("created_at"),
                     "last_modified": obj.get("LastModified"),
@@ -240,6 +254,7 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                 "source": "user",
                 "description": rds.get("description", ""),
                 "tags": rds.get("tags", []),
+                "image_url": None,
                 "author_username": rds.get("author_username"),
                 "created_at": rds.get("created_at"),
                 "last_modified": None,
