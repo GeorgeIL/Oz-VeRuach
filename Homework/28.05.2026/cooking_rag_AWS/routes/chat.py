@@ -68,6 +68,19 @@ def _fetch_buddy_names(conn, user_id: str) -> list[str]:
         return [row["name"] for row in cur.fetchall()]
 
 
+def _fetch_buddy_contacts(conn, user_id: str) -> dict[str, str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT name, email FROM cooking_buddies
+            WHERE user_id = %s
+            ORDER BY name
+            """,
+            (user_id,),
+        )
+        return {row["name"]: row["email"] for row in cur.fetchall()}
+
+
 def _build_email_context_from_body(recipe_title: str, recipe_body: str) -> str:
     title = recipe_title.strip()
     body = recipe_body.strip()
@@ -245,6 +258,7 @@ def ask():
     active_slugs = recipe_lookup.resolve_active_recipe_slugs(question, recent, conn)
     authoritative = recipe_lookup.build_authoritative_context(active_slugs, conn)
     buddy_names = _fetch_buddy_names(conn, user["sub"])
+    buddy_contacts = _fetch_buddy_contacts(conn, user["sub"])
     last_recipe = buddy_share.extract_recipe_from_history(recent, conn)
     last_recipe_title = ""
     last_recipe_body = ""
@@ -258,6 +272,7 @@ def ask():
         "user_id": user["sub"],
         "sender_name": sender_name,
         "username": user.get("username") or "",
+        "buddy_contacts": json.dumps(buddy_contacts),
     }
     prompt_attributes = {
         "pantry": ", ".join(pantry) if pantry else "none listed",

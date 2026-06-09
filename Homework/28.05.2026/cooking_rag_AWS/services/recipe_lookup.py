@@ -11,9 +11,18 @@ _FOLLOWUP_RE = re.compile(
     r"tags?\s+of\b|"
     r"last\s+(question|recipe)\b|"
     r"what\s+was\s+my\b|"
-    r"my\s+last\s+question\b",
+    r"my\s+last\s+question\b|"
+    r"\b(?:recipe\s*#?\s*\d+|(?:the\s+)?(?:first|second|third)\b(?:\s+(?:one|recipe|suggestion))?)\b",
     re.IGNORECASE,
 )
+
+_LIST_ITEM_RE = re.compile(r"^\s*(\d+)\.\s+(.+?)\s*$", re.MULTILINE)
+_RECIPE_REF_RE = re.compile(
+    r"\b(?:recipe\s*#?\s*(\d+)|(?:the\s+)?(first|second|third)\b(?:\s+(?:one|recipe|suggestion))?)\b",
+    re.IGNORECASE,
+)
+_ORDINAL_TO_NUM = {"first": 1, "second": 2, "third": 3}
+_PLACEHOLDER_TITLE_RE = re.compile(r"^suggested\s+recipe\s+\d+$", re.IGNORECASE)
 
 
 def _normalize_title(title: str) -> str:
@@ -84,11 +93,58 @@ def last_user_message(history: list[dict]) -> str:
     return ""
 
 
+def last_assistant_message(history: list[dict]) -> str:
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            return str(msg.get("content") or "")
+    return ""
+
+
+def parse_numbered_recipe_list(text: str) -> dict[int, str]:
+    """Parse '1. Recipe Name' lines from an assistant suggestion list."""
+    items: dict[int, str] = {}
+    for match in _LIST_ITEM_RE.finditer(text or ""):
+        number = int(match.group(1))
+        title = match.group(2).strip()
+        title = re.sub(r"\s*[-–—]\s*.*$", "", title).strip()
+        if not title or _PLACEHOLDER_TITLE_RE.match(title):
+            continue
+        items[number] = title
+    return items
+
+
+def resolve_recipe_number_reference(
+    question: str, history: list[dict], conn, max_results: int = 1
+) -> list[str]:
+    """Map 'recipe 1' / 'the first one' to a cookbook slug from the prior suggestion list."""
+    match = _RECIPE_REF_RE.search(question or "")
+    if not match:
+        return []
+
+    if match.group(1):
+        number = int(match.group(1))
+    else:
+        number = _ORDINAL_TO_NUM.get((match.group(2) or "").lower(), 0)
+    if number < 1:
+        return []
+
+    listed = parse_numbered_recipe_list(last_assistant_message(history))
+    title = listed.get(number)
+    if not title:
+        return []
+
+    return detect_recipe_slugs(title, conn, max_results=max_results)
+
+
 def resolve_active_recipe_slugs(
     question: str, history: list[dict], conn, max_results: int = 2
 ) -> list[str]:
     """Resolve which recipe(s) the user is asking about (current or follow-up)."""
     slugs = detect_recipe_slugs(question, conn, max_results=max_results)
+    if slugs:
+        return slugs
+
+    slugs = resolve_recipe_number_reference(question, history, conn, max_results=max_results)
     if slugs:
         return slugs
 

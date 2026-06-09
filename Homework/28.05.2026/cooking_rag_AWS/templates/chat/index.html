@@ -140,6 +140,8 @@
   // use a separate renderer path and are unaffected.
   if (typeof marked !== "undefined") {
     marked.use({
+      gfm: true,
+      breaks: true,
       renderer: {
         codespan(text) {
           return text;

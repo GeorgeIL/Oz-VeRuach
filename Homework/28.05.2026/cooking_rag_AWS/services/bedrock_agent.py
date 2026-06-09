@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import boto3
 
@@ -19,6 +20,9 @@ _AGENT_FAILURE_MARKERS = (
     "sorry, i am unable to assist you with this request",
     "sorry i cannot answer",
 )
+
+# Old prepared alias (v5) returns flattened catalog IDs instead of recipe names.
+_STALE_PROD_RE = re.compile(r"\b\d{1,4}\s+\*\*Tags:\*\*")
 
 
 def _client():
@@ -41,17 +45,25 @@ def _is_failure_answer(text: str) -> bool:
         return True
     if "cannot suggest" in normalized or "cannot answer" in normalized:
         return True
+    if _STALE_PROD_RE.search(text):
+        return True
+    if "only provide the current date and time" in normalized:
+        return True
     return False
 
 
 def _alias_ids_to_try() -> list[str]:
+    """Return alias IDs in invocation order.
+
+    Prefer TSTALIASID (DRAFT) first when fallback is enabled. Custom prod aliases
+    often still route to old prepared snapshots (GetTime/GetWeather only).
+    """
     primary = (Config.BEDROCK_AGENT_ALIAS_ID or "").strip()
-    aliases: list[str] = []
-    if primary:
-        aliases.append(primary)
-    if Config.BEDROCK_AGENT_FALLBACK_TO_DRAFT and DRAFT_ALIAS_ID not in aliases:
-        aliases.append(DRAFT_ALIAS_ID)
-    return aliases
+    if primary == DRAFT_ALIAS_ID:
+        return [DRAFT_ALIAS_ID]
+    if Config.BEDROCK_AGENT_FALLBACK_TO_DRAFT:
+        return [DRAFT_ALIAS_ID, primary] if primary else [DRAFT_ALIAS_ID]
+    return [primary] if primary else []
 
 
 def _extract_answer_from_event(event: dict) -> tuple[str, str]:

@@ -15,11 +15,19 @@ logger.setLevel(logging.INFO)
 
 _AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 _BEDROCK_KB_ID = os.environ.get("BEDROCK_KB_ID", "")
+_S3_BUCKET = os.environ.get("S3_BUCKET_NAME", "")
+_S3_PREFIX = os.environ.get("S3_RECIPES_PREFIX", "recipes/")
+_CATALOG_MANIFEST_KEY = f"{_S3_PREFIX}catalog/manifest.json"
 _METEOSOURCE_API_KEY = os.environ.get("METEOSOURCE_API_KEY", "")
 _FLASK_TOOL_URL = os.environ.get(
     "FLASK_TOOL_URL", "http://127.0.0.1:5000/chat/agent/share-recipe"
 )
 _AGENT_TOOL_SECRET = os.environ.get("AGENT_TOOL_SECRET", "")
+_BUDDY_EMAIL_LAMBDA = os.environ.get(
+    "BUDDY_EMAIL_LAMBDA_NAME", "cooking-rag-buddy-email"
+)
+
+_lambda_client = None
 
 _RECIPE_KEYWORDS = (
     "recipe",
@@ -39,6 +47,10 @@ _RECIPE_KEYWORDS = (
 )
 
 _bedrock_agent_runtime = None
+_s3_client = None
+_manifest_cache: dict[str, dict] | None = None
+
+_CATALOG_ID_HEADING_RE = re.compile(r"^\d+\s+\*\*Tags:\*\*", re.IGNORECASE)
 
 
 def _agent_runtime():
@@ -48,6 +60,254 @@ def _agent_runtime():
             "bedrock-agent-runtime", region_name=_AWS_REGION
         )
     return _bedrock_agent_runtime
+
+
+def _lambda():
+    global _lambda_client
+    if _lambda_client is None:
+        _lambda_client = boto3.client("lambda", region_name=_AWS_REGION)
+    return _lambda_client
+
+
+def _s3():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3", region_name=_AWS_REGION)
+    return _s3_client
+
+
+def _title_from_slug(slug: str) -> str:
+    return slug.replace("-", " ").strip().title()
+
+
+def _load_catalog_manifest() -> dict[str, dict]:
+    global _manifest_cache
+    if _manifest_cache is not None:
+        return _manifest_cache
+
+    lookup: dict[str, dict] = {}
+    if not _S3_BUCKET:
+        _manifest_cache = lookup
+        return lookup
+
+    try:
+        response = _s3().get_object(Bucket=_S3_BUCKET, Key=_CATALOG_MANIFEST_KEY)
+        payload = json.loads(response["Body"].read().decode("utf-8"))
+        for item in payload.get("recipes", []):
+            slug = str(item.get("slug") or "").strip()
+            if slug:
+                lookup[slug] = item
+    except Exception as exc:
+        logger.warning("Could not load catalog manifest: %s", exc)
+
+    _manifest_cache = lookup
+    return lookup
+
+
+def _slug_from_s3_uri(uri: str) -> str | None:
+    if not uri:
+        return None
+    path = uri.split("://", 1)[-1]
+    if "/" in path:
+        path = path.split("/", 1)[1]
+    if not path.endswith(".md"):
+        return None
+    slug = path.rsplit("/", 1)[-1][:-3]
+    if slug == "manifest":
+        return None
+    return slug or None
+
+
+def _s3_key_from_uri(uri: str) -> str | None:
+    if not uri or "://" not in uri:
+        return None
+    return uri.split("://", 1)[1].split("/", 1)[-1]
+
+
+def _title_from_manifest_slug(slug: str, manifest: dict[str, dict]) -> str | None:
+    item = manifest.get(slug)
+    if item:
+        title = str(item.get("title") or "").strip()
+        if title:
+            return title
+    return None
+
+
+def _title_from_s3_key(s3_key: str) -> str | None:
+    if not _S3_BUCKET or not s3_key:
+        return None
+    try:
+        body = _s3().get_object(Bucket=_S3_BUCKET, Key=s3_key)["Body"].read().decode(
+            "utf-8"
+        )
+    except Exception:
+        return None
+    return _title_from_md_heading(body)
+
+
+def _title_from_json_snippet(text: str) -> str | None:
+    match = re.search(r'"title"\s*:\s*"((?:\\.|[^"\\])*)"', text)
+    if not match:
+        return None
+    try:
+        return json.loads(f'"{match.group(1)}"')
+    except json.JSONDecodeError:
+        return match.group(1).replace('\\"', '"').strip() or None
+
+
+def _title_from_md_heading(text: str) -> str | None:
+    match = re.search(r"^#\s+(.+)$", text.strip(), re.MULTILINE)
+    if not match:
+        return None
+    title = match.group(1).strip()
+    if not title or title.isdigit() or _CATALOG_ID_HEADING_RE.match(title):
+        return None
+    if "##" in title or "**Tags:**" in title:
+        return None
+    return title
+
+
+def _resolve_recipe_title(text: str, source_uri: str, manifest: dict[str, dict]) -> str | None:
+    slug = _slug_from_s3_uri(source_uri)
+    if slug:
+        title = _title_from_manifest_slug(slug, manifest)
+        if title:
+            return title
+
+    title = _title_from_json_snippet(text)
+    if title:
+        return title
+
+    title = _title_from_md_heading(text)
+    if title:
+        return title
+
+    if slug:
+        if not slug.isdigit():
+            return _title_from_slug(slug)
+        s3_key = _s3_key_from_uri(source_uri)
+        if s3_key:
+            return _title_from_s3_key(s3_key)
+
+    return None
+
+
+def _prompt_attr(event: Dict[str, Any], name: str) -> str:
+    attrs = event.get("promptSessionAttributes") or {}
+    return str(attrs.get(name) or "").strip()
+
+
+def _parse_buddy_contacts(session_attrs: Dict[str, Any]) -> dict[str, str]:
+    raw = str(session_attrs.get("buddy_contacts") or "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {str(k): str(v) for k, v in parsed.items()}
+    except json.JSONDecodeError:
+        logger.warning("Invalid buddy_contacts JSON in sessionAttributes")
+    return {}
+
+
+def _resolve_buddy_contact(
+    buddy_name: str, contacts: dict[str, str]
+) -> tuple[str, str] | None:
+    if not buddy_name or not contacts:
+        return None
+
+    normalized = re.sub(r"\s+", " ", buddy_name.strip().lower())
+    for name, email in contacts.items():
+        if name.strip().lower() == normalized:
+            return name, email
+
+    for name, email in sorted(contacts.items(), key=lambda item: len(item[0]), reverse=True):
+        name_lower = name.strip().lower()
+        if normalized in name_lower or name_lower.startswith(f"{normalized} "):
+            return name, email
+
+    first = normalized.split()[0] if normalized else ""
+    if first:
+        matches = [
+            (name, email)
+            for name, email in contacts.items()
+            if name.strip().lower().split()[0] == first
+        ]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _build_email_context(recipe_title: str, recipe_body: str) -> str:
+    title = recipe_title.strip()
+    body = recipe_body.strip()
+    if body.lower().startswith("#"):
+        return body
+    return f"# {title}\n\n{body}"
+
+
+def _invoke_buddy_email_lambda(
+    *,
+    sender_name: str,
+    buddy_name: str,
+    buddy_email: str,
+    recipe_title: str,
+    recipe_body: str,
+) -> str:
+    if not _BUDDY_EMAIL_LAMBDA:
+        raise ValueError("BUDDY_EMAIL_LAMBDA_NAME is not configured on the action Lambda")
+
+    context = _build_email_context(recipe_title, recipe_body)
+    payload = {
+        "sender_name": sender_name or "A Smart Cookbook user",
+        "subject": f"Recipe: {recipe_title.strip()}",
+        "context": context,
+        "buddies": [{"name": buddy_name, "email": buddy_email}],
+    }
+    _lambda().invoke(
+        FunctionName=_BUDDY_EMAIL_LAMBDA,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode("utf-8"),
+    )
+    return f"Email queued for {buddy_name} ({buddy_email})"
+
+
+def _share_via_flask(
+    *,
+    user_id: str,
+    sender_name: str,
+    buddy_name: str,
+    recipe_title: str,
+    recipe_body: str,
+) -> str:
+    if not _AGENT_TOOL_SECRET:
+        raise ValueError("AGENT_TOOL_SECRET is not configured on the Lambda")
+
+    payload = json.dumps(
+        {
+            "user_id": user_id,
+            "sender_name": sender_name,
+            "buddy_name": buddy_name,
+            "recipe_title": recipe_title,
+            "recipe_body": recipe_body,
+        }
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        _FLASK_TOOL_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Agent-Tool-Secret": _AGENT_TOOL_SECRET,
+        },
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+        if resp.status != 200 or not body.get("ok"):
+            raise Exception(body.get("error") or body.get("message") or "Share failed")
+        return str(body.get("message") or "Email queued successfully.")
 
 
 def _param_value(event: Dict[str, Any], name: str) -> Optional[str]:
@@ -161,20 +421,8 @@ def _fetch_weather(location: str) -> tuple[str, str]:
         return str(summary), str(temp)
 
 
-def _extract_titles(chunks: list[str], limit: int = 3) -> list[str]:
-    titles: list[str] = []
-    for chunk in chunks:
-        match = re.search(r"^#\s+(.+)$", chunk.strip(), re.MULTILINE)
-        if match:
-            title = match.group(1).strip()
-            if title and title not in titles:
-                titles.append(title)
-        if len(titles) >= limit:
-            break
-    return titles
-
-
-def _retrieve_recipe_suggestions(query: str, top_k: int = 5) -> list[str]:
+def _retrieve_recipe_suggestions(query: str, top_k: int = 12) -> list[dict[str, str]]:
+    """Retrieve KB hits with source URI so we can resolve real recipe titles."""
     if not _BEDROCK_KB_ID:
         return []
 
@@ -190,11 +438,41 @@ def _retrieve_recipe_suggestions(query: str, top_k: int = 5) -> list[str]:
         logger.error("Knowledge base retrieve failed: %s", exc)
         return []
 
-    return [
-        r.get("content", {}).get("text", "").strip()
-        for r in response.get("retrievalResults", [])
-        if r.get("content", {}).get("text", "").strip()
-    ]
+    hits: list[dict[str, str]] = []
+    for result in response.get("retrievalResults", []):
+        text = (result.get("content") or {}).get("text", "").strip()
+        if not text:
+            continue
+        location = result.get("location") or {}
+        s3_loc = location.get("s3Location") or {}
+        source_uri = str(s3_loc.get("uri") or "").strip()
+        if source_uri.endswith("/manifest.json"):
+            continue
+        hits.append({"text": text, "source_uri": source_uri})
+    return hits
+
+
+def _extract_titles(hits: list[dict[str, str]], limit: int = 3) -> list[str]:
+    manifest = _load_catalog_manifest()
+    titles: list[str] = []
+    seen_sources: set[str] = set()
+
+    for hit in hits:
+        source_uri = hit.get("source_uri") or hit.get("text", "")[:80]
+        if source_uri in seen_sources:
+            continue
+
+        title = _resolve_recipe_title(hit.get("text", ""), hit.get("source_uri", ""), manifest)
+        if not title:
+            continue
+
+        seen_sources.add(source_uri)
+        if title not in titles:
+            titles.append(title)
+        if len(titles) >= limit:
+            break
+
+    return titles
 
 
 def _get_time_text() -> str:
@@ -230,8 +508,8 @@ def _suggest_dish_for_time_and_weather(event: Dict[str, Any]) -> str:
         meal_hint,
     ]
     retrieval_query = " ".join(part for part in query_parts if part)
-    chunks = _retrieve_recipe_suggestions(retrieval_query)
-    titles = _extract_titles(chunks)
+    hits = _retrieve_recipe_suggestions(retrieval_query)
+    titles = _extract_titles(hits)
 
     lines = [
         f"Current date and time: {now.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -242,14 +520,9 @@ def _suggest_dish_for_time_and_weather(event: Dict[str, Any]) -> str:
         lines.append(f"Meal preference: {meal_hint}.")
 
     if titles:
-        lines.append("Suggested cookbook recipes:")
+        lines.append("Suggested cookbook recipes (names only — use KB for full details):")
         for idx, title in enumerate(titles, start=1):
-            lines.append(f"{idx}. {title} — fits current time and weather.")
-    elif chunks:
-        lines.append("Relevant cookbook excerpts (use titles from context):")
-        for idx, chunk in enumerate(chunks[:3], start=1):
-            snippet = chunk[:300].replace("\n", " ")
-            lines.append(f"{idx}. {snippet}...")
+            lines.append(f"{idx}. {title}")
     else:
         lines.append(
             "No matching recipes found in the knowledge base for this context."
@@ -302,12 +575,21 @@ def _share_recipe_with_buddy(event: Dict[str, Any]) -> str:
     recipe_title = (_param_value(event, "recipe_title") or "").strip()
     recipe_body = (_param_value(event, "recipe_body") or "").strip()
 
+    if not recipe_title:
+        recipe_title = _prompt_attr(event, "last_recipe_title")
+    if not recipe_body:
+        recipe_body = _prompt_attr(event, "last_recipe_body")
+
     if not buddy_name:
         raise ValueError("buddy_name parameter is required")
     if not recipe_title:
-        raise ValueError("recipe_title parameter is required")
+        raise ValueError(
+            "recipe_title is required (pass it or ensure last_recipe_title is in session)"
+        )
     if not recipe_body:
-        raise ValueError("recipe_body parameter is required")
+        raise ValueError(
+            "recipe_body is required (pass it or ensure last_recipe_body is in session)"
+        )
 
     session_attrs = event.get("sessionAttributes") or {}
     user_id = (session_attrs.get("user_id") or "").strip()
@@ -316,35 +598,41 @@ def _share_recipe_with_buddy(event: Dict[str, Any]) -> str:
     if not user_id:
         raise ValueError("user_id missing from sessionAttributes")
 
-    if not _AGENT_TOOL_SECRET:
-        raise ValueError("AGENT_TOOL_SECRET is not configured on the Lambda")
+    contacts = _parse_buddy_contacts(session_attrs)
+    resolved = _resolve_buddy_contact(buddy_name, contacts)
+    if resolved:
+        canonical_name, buddy_email = resolved
+        try:
+            return _invoke_buddy_email_lambda(
+                sender_name=sender_name,
+                buddy_name=canonical_name,
+                buddy_email=buddy_email,
+                recipe_title=recipe_title,
+                recipe_body=recipe_body,
+            )
+        except Exception as exc:
+            logger.error("Direct buddy email invoke failed: %s", exc)
+            if "AccessDenied" in str(exc) or "not authorized" in str(exc).lower():
+                raise Exception(
+                    "Lambda lacks permission to invoke the buddy email function. "
+                    "Add lambda:InvokeFunction on cooking-rag-buddy-email to the action Lambda role."
+                ) from exc
+            raise
 
-    payload = json.dumps(
-        {
-            "user_id": user_id,
-            "sender_name": sender_name,
-            "buddy_name": buddy_name,
-            "recipe_title": recipe_title,
-            "recipe_body": recipe_body,
-        }
-    ).encode("utf-8")
-
-    req = urllib.request.Request(
-        _FLASK_TOOL_URL,
-        data=payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Agent-Tool-Secret": _AGENT_TOOL_SECRET,
-        },
-    )
-
+    # Fallback: Flask resolves buddy in RDS (requires reachable FLASK_TOOL_URL).
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            if resp.status != 200 or not body.get("ok"):
-                raise Exception(body.get("error") or body.get("message") or "Share failed")
-            return str(body.get("message") or "Email queued successfully.")
+        return _share_via_flask(
+            user_id=user_id,
+            sender_name=sender_name,
+            buddy_name=buddy_name,
+            recipe_title=recipe_title,
+            recipe_body=recipe_body,
+        )
+    except urllib.error.URLError as exc:
+        raise Exception(
+            "Could not reach Flask to send the email. Configure buddy_contacts in "
+            "sessionAttributes or set BUDDY_EMAIL_LAMBDA_NAME on the action Lambda."
+        ) from exc
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         try:

@@ -169,6 +169,23 @@ function isValidRecipeData(data) {
   );
 }
 
+function tryParseTrailingRecipeJson(text) {
+  const trimmed = String(text || "").trimEnd();
+  const start = trimmed.lastIndexOf("{");
+  if (start === -1) return null;
+
+  const candidate = trimmed.slice(start);
+  try {
+    const data = JSON.parse(candidate);
+    if (isValidRecipeData(data)) {
+      return { display: trimmed.slice(0, start).trimEnd(), data };
+    }
+  } catch {
+    /* not valid JSON */
+  }
+  return null;
+}
+
 function extractRecipeJsonBlocks(content) {
   const blocks = [];
   let display = content || "";
@@ -188,6 +205,15 @@ function extractRecipeJsonBlocks(content) {
 
   RECIPE_FENCE_RE.lastIndex = 0;
   display = display.replace(RECIPE_FENCE_RE, "").trim();
+
+  const trailing = tryParseTrailingRecipeJson(display);
+  if (trailing) {
+    if (!blocks.some((b) => recipeFingerprint(b) === recipeFingerprint(trailing.data))) {
+      blocks.push(trailing.data);
+    }
+    display = trailing.display;
+  }
+
   return { display, blocks };
 }
 
@@ -220,15 +246,73 @@ function createSavedRecipeLabel() {
   return label;
 }
 
+function normalizeAssistantMarkdown(text) {
+  if (!text) return "";
+
+  let s = String(text);
+
+  // Drop leading catalog row numbers before tags (e.g. "680 Tags:" from KB excerpts).
+  s = s.replace(/(^|\n)(\d{1,4})\s+(\*\*Tags:\*\*|Tags:)/g, "$1$3");
+
+  // Plain section labels (common in new-recipe agent replies) -> markdown h2.
+  s = s.replace(/^Ingredients:\s*$/gim, "## Ingredients");
+  s = s.replace(/^Steps:\s*$/gim, "## Steps");
+  s = s.replace(/^Description:\s*$/gim, "## Description");
+  s = s.replace(/^Notes:\s*$/gim, "## Notes");
+
+  // Standalone recipe title line before Ingredients -> ## heading.
+  s = s.replace(
+    /\n(?![#*\-\d])([^\n:#*]{3,100})\n(?:\s*\n)*(## Ingredients\b)/gi,
+    "\n## $1\n\n$2",
+  );
+
+  // Block headers must start on their own line.
+  s = s.replace(/([^\n#])\s+(#{1,3}\s+)/g, "$1\n\n$2");
+
+  // Tags line on its own.
+  s = s.replace(/([^\n])\s+(\*\*Tags:\*\*)/g, "$1\n\n$2");
+  s = s.replace(/([^\n])\s+(Tags:)/g, "$1\n\n$2");
+
+  // Section headers that were already ## but inline.
+  for (const heading of ["Description", "Ingredients", "Steps", "Notes"]) {
+    const re = new RegExp(`([^\\n])\\s+(##\\s+${heading}\\b)`, "gi");
+    s = s.replace(re, "$1\n\n$2");
+  }
+
+  // Indented lines -> markdown list items.
+  s = s.replace(/^[ \t]{2,}(.+)$/gm, (_m, item) => {
+    const t = item.trim();
+    if (!t) return "";
+    if (/^\d+\.\s/.test(t)) return t;
+    if (t.startsWith("- ") || t.startsWith("* ")) return t;
+    return `- ${t}`;
+  });
+
+  // Ingredient bullets: " - item - item" -> separate lines.
+  s = s.replace(/(## Ingredients[^\n]*)\n?/gi, "$1\n");
+  s = s.replace(/(## Ingredients[^\n]*?)\s+-\s+/gi, "$1\n- ");
+  s = s.replace(/(\n- [^\n]+?)\s+-\s+/g, "$1\n- ");
+
+  // Numbered steps on one line -> one step per line.
+  s = s.replace(/(## Steps[^\n]*)\n?/gi, "$1\n");
+  s = s.replace(/([^\n\d])\s+(\d+\.\s+)/g, "$1\n$2");
+
+  // Avoid wrapping the entire recipe in one bold span.
+  s = s.replace(/\*\*([^*\n]{240,})\*\*/g, "$1");
+
+  return s.replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function mountAssistantContent(messageDiv, rawContent) {
   const contentEl = messageDiv.querySelector(".message-content");
   if (!contentEl) return;
 
   const { display, blocks } = extractRecipeJsonBlocks(rawContent);
+  const normalized = normalizeAssistantMarkdown(display || "");
   contentEl.innerHTML =
     typeof marked !== "undefined"
-      ? marked.parse(display || "")
-      : escapeHtml(display || "");
+      ? marked.parse(normalized)
+      : escapeHtml(normalized || "");
   attachRecipeButtons(messageDiv, blocks);
 }
 
