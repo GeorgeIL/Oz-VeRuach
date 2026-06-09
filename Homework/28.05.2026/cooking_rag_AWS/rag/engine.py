@@ -6,7 +6,7 @@ Public API:
   ask_chef(question, chunks, history, pantry) → str  Nova Lite via Converse API
   parse_recipe_from_text(raw_text)  → dict        Structured recipe extraction
   sync_knowledge_base()             → dict        Trigger KB ingestion job(s)
-  get_index_status(user_count)      → dict        S3 + Bedrock index summary
+  get_index_status(conn, user_id)   → dict        unified recipe index summary
 """
 
 import json
@@ -403,16 +403,31 @@ def _get_last_sync_status() -> str | None:
     return ", ".join(statuses)
 
 
-def get_index_status(user_count: int = 0) -> IndexStatus:
+def get_index_status(conn=None, user_id: str | None = None) -> IndexStatus:
     """
-    Return approximate indexed document counts from S3 plus the latest Bedrock
-    ingestion job status. User recipes are counted from RDS via user_count.
+    Return indexed document counts plus the latest Bedrock ingestion job status.
+
+    Counts are derived from the same unified recipe index used by the main recipe
+    page (``s3_recipes.build_recipe_index``) so both pages always agree. When no DB
+    connection is available, falls back to a raw S3 catalog count.
     """
-    catalog_count = _count_s3_md_files(_catalog_s3_prefix())
-    total_documents = catalog_count + user_count
+    catalog_count = 0
+    user_count = 0
+    if conn is not None:
+        from services import s3_recipes
+
+        index = s3_recipes.build_recipe_index(conn, user_id=user_id)
+        for entry in index:
+            if entry.get("source") == "user":
+                user_count += 1
+            else:
+                catalog_count += 1
+    else:
+        catalog_count = _count_s3_md_files(_catalog_s3_prefix())
+
     return {
         "catalog_count": catalog_count,
         "user_count": user_count,
-        "total_documents": total_documents,
+        "total_documents": catalog_count + user_count,
         "last_sync_status": _get_last_sync_status(),
     }

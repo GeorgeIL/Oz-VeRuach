@@ -204,15 +204,18 @@ def chat_page():
             (conv_id,),
         )
         messages = [dict(r) for r in cur.fetchall()]
-        cur.execute("SELECT COUNT(*) AS cnt FROM recipes WHERE author_id = %s", (user["sub"],))
-        user_recipe_count = cur.fetchone()["cnt"]
-    index_status = rag.get_index_status(user_recipe_count)
+        cur.execute(
+            "SELECT title FROM recipes WHERE author_id = %s", (user["sub"],)
+        )
+        saved_titles = [r["title"] for r in cur.fetchall() if r["title"]]
+    index_status = rag.get_index_status(conn, user["sub"])
     return render_template(
         "chat/index.html",
         messages=messages,
         index_ready=True,
         index_error=None,
         index_status=index_status,
+        saved_titles=saved_titles,
     )
 
 

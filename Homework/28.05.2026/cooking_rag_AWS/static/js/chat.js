@@ -229,8 +229,22 @@ function markRecipeSaved(data) {
   localStorage.setItem(SAVED_RECIPES_STORAGE_KEY, JSON.stringify([...keys]));
 }
 
+function getServerSavedTitles() {
+  try {
+    return new Set(
+      (window.SAVED_RECIPE_TITLES || []).map((t) =>
+        String(t).trim().toLowerCase(),
+      ),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
 function isRecipeSaved(data) {
-  return getSavedRecipeKeys().has(recipeFingerprint(data));
+  if (getSavedRecipeKeys().has(recipeFingerprint(data))) return true;
+  const title = String(data?.title || "").trim().toLowerCase();
+  return Boolean(title) && getServerSavedTitles().has(title);
 }
 
 function recipeFingerprint(data) {
@@ -508,7 +522,9 @@ function mountAssistantContent(messageDiv, rawContent, serverRecipe = null) {
   if (serverRecipe && isValidRecipeData(serverRecipe)) {
     // Trust server-resolved recipe only — avoid duplicate blocks from raw answer text.
     blocks.length = 0;
-    blocks.push(normalizeRecipeData(serverRecipe));
+    const normalized = normalizeRecipeData(serverRecipe);
+    if (serverRecipe.already_saved) normalized.already_saved = true;
+    blocks.push(normalized);
   } else if (!blocks.length && looksLikeFullRecipeAnswer(rawContent)) {
     const parsed = parseMarkdownRecipe(rawContent);
     if (parsed) blocks.push(parsed);
@@ -540,7 +556,7 @@ function attachRecipeButtons(div, recipeBlocks = []) {
   for (const data of blocks) {
     if (!isValidRecipeData(data)) continue;
 
-    if (isRecipeSaved(data)) {
+    if (data.already_saved || isRecipeSaved(data)) {
       if (!div.querySelector(".recipe-saved-label")) {
         bubble.after(createSavedRecipeLabel());
       }

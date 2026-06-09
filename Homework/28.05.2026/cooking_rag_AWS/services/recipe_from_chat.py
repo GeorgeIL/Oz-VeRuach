@@ -367,6 +367,26 @@ def _slug_for_answer(answer: str, active_slugs: list[str], conn, user_id: str | 
     return None
 
 
+def _user_has_saved_recipe(conn, user_id: str | None, title: str) -> bool:
+    """True when the user already has a recipe with this title in their cookbook."""
+    if not user_id or not title or not title.strip():
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM recipes WHERE author_id = %s AND lower(title) = lower(%s) LIMIT 1",
+            (user_id, title.strip()),
+        )
+        return cur.fetchone() is not None
+
+
+def _annotate_saved(data: dict | None, conn, user_id: str | None) -> dict | None:
+    if data is not None:
+        data["already_saved"] = _user_has_saved_recipe(
+            conn, user_id, data.get("title", "")
+        )
+    return data
+
+
 def process_answer(
     answer: str, active_slugs: list[str], conn, user_id: str | None = None
 ) -> tuple[str, dict | None]:
@@ -385,7 +405,7 @@ def process_answer(
         data, start, end = block
         rendered = render_recipe_markdown(data)
         display = (answer[:start].rstrip() + "\n\n" + rendered + "\n" + answer[end:].lstrip()).strip()
-        return display, data
+        return display, _annotate_saved(data, conn, user_id)
 
     if not looks_like_full_recipe_answer(answer):
         return answer, None
@@ -396,11 +416,11 @@ def process_answer(
         data = recipe_data_from_slug(slug, conn, user_id=user_id)
         if data:
             # Agent output is capped at ~1–8k tokens; always show the full S3 catalog entry.
-            return render_recipe_markdown(data), data
+            return render_recipe_markdown(data), _annotate_saved(data, conn, user_id)
 
     parsed = markdown_to_recipe_data(answer)
     if parsed:
-        return render_recipe_markdown(parsed), parsed
+        return render_recipe_markdown(parsed), _annotate_saved(parsed, conn, user_id)
 
     return answer, None
 
