@@ -9,6 +9,9 @@ from db import get_db
 from rag import engine as rag
 from services import bedrock_agent, buddy_share, recipe_lookup
 
+# Max chars of last recipe body passed to the agent for ShareRecipeWithBuddy
+_LAST_RECIPE_PROMPT_MAX_CHARS = 6000
+
 chat_bp = Blueprint("chat", __name__, url_prefix="/chat")
 
 
@@ -73,6 +76,34 @@ def _build_email_context_from_body(recipe_title: str, recipe_body: str) -> str:
     return f"# {title}\n\n{body}"
 
 
+def _lookup_buddy_row(conn, user_id: str, buddy_name: str) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id::text AS id, name, email
+            FROM cooking_buddies
+            WHERE user_id = %s
+            ORDER BY name
+            """,
+            (user_id,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+
+    if not rows:
+        return None
+
+    resolved = buddy_share.resolve_buddy_name(
+        buddy_name.strip(), [row["name"] for row in rows]
+    )
+    if not resolved:
+        return None
+
+    for row in rows:
+        if row["name"] == resolved:
+            return row
+    return None
+
+
 def _send_recipe_email_to_buddy(
     conn,
     *,
@@ -85,17 +116,7 @@ def _send_recipe_email_to_buddy(
     if not Config.BUDDY_EMAIL_LAMBDA_NAME:
         return False, "Email service is not configured"
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id::text AS id, name, email
-            FROM cooking_buddies
-            WHERE user_id = %s AND LOWER(name) = LOWER(%s)
-            LIMIT 1
-            """,
-            (user_id, buddy_name.strip()),
-        )
-        buddy = cur.fetchone()
+    buddy = _lookup_buddy_row(conn, user_id, buddy_name)
 
     if not buddy:
         return False, f"No cooking buddy named '{buddy_name}' was found"
@@ -224,47 +245,14 @@ def ask():
     active_slugs = recipe_lookup.resolve_active_recipe_slugs(question, recent, conn)
     authoritative = recipe_lookup.build_authoritative_context(active_slugs, conn)
     buddy_names = _fetch_buddy_names(conn, user["sub"])
+    last_recipe = buddy_share.extract_recipe_from_history(recent, conn)
+    last_recipe_title = ""
+    last_recipe_body = ""
+    if last_recipe:
+        last_recipe_title, last_recipe_body = last_recipe
+        last_recipe_body = last_recipe_body[:_LAST_RECIPE_PROMPT_MAX_CHARS]
 
     sender_name = user.get("username") or "A Smart Cookbook user"
-    share_buddy = buddy_share.detect_buddy_for_share(question, buddy_names)
-    if share_buddy:
-        recipe = buddy_share.extract_recipe_from_history(recent, conn)
-        if not recipe:
-            answer = (
-                "I couldn't find a recipe in our conversation to send. "
-                "Ask about a recipe first, then ask me to share it with your buddy."
-            )
-        else:
-            recipe_title, recipe_body = recipe
-            ok, message = _send_recipe_email_to_buddy(
-                conn,
-                user_id=user["sub"],
-                sender_name=sender_name,
-                buddy_name=share_buddy,
-                recipe_title=recipe_title,
-                recipe_body=recipe_body,
-            )
-            if ok:
-                answer = (
-                    f"Done! {message} "
-                    f"I sent **{recipe_title}** to {share_buddy}."
-                )
-            else:
-                answer = f"I couldn't send the email: {message}"
-
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO messages (conversation_id, role, content, created_at)"
-                " VALUES (%s, %s, %s, clock_timestamp())",
-                (conv_id, "user", question),
-            )
-            cur.execute(
-                "INSERT INTO messages (conversation_id, role, content, created_at)"
-                " VALUES (%s, %s, %s, clock_timestamp())",
-                (conv_id, "assistant", answer),
-            )
-        conn.commit()
-        return jsonify({"answer": answer, "sources": 0})
 
     session_attributes = {
         "user_id": user["sub"],
@@ -275,6 +263,8 @@ def ask():
         "pantry": ", ".join(pantry) if pantry else "none listed",
         "buddy_names": ", ".join(buddy_names) if buddy_names else "none added yet",
         "active_recipe": "\n\n".join(authoritative) if authoritative else "",
+        "last_recipe_title": last_recipe_title,
+        "last_recipe_body": last_recipe_body,
     }
 
     try:

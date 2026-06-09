@@ -80,6 +80,24 @@ def _extract_name_candidates(question: str) -> list[str]:
     return unique
 
 
+def resolve_buddy_name(candidate: str, buddy_names: list[str]) -> str | None:
+    """Match a partial or full buddy name to one saved cooking buddy."""
+    if not candidate or not buddy_names:
+        return None
+
+    normalized_candidate = _normalize_name(candidate)
+    for name in buddy_names:
+        if _normalize_name(name) == normalized_candidate:
+            return name
+
+    lower_question = normalized_candidate
+    for name in sorted(buddy_names, key=len, reverse=True):
+        if _normalize_name(name) in lower_question or lower_question in _normalize_name(name):
+            return name
+
+    return _resolve_buddy(candidate, buddy_names)
+
+
 def _resolve_buddy(candidate: str, buddy_names: list[str]) -> str | None:
     normalized = _normalize_name(candidate)
     if not normalized or normalized in _NAME_STOPWORDS:

@@ -395,7 +395,7 @@ def _get_last_sync_status() -> str | None:
                 knowledgeBaseId=Config.BEDROCK_KB_ID,
                 dataSourceId=ds_id,
                 maxResults=1,
-                sortBy={"attributeName": "STARTED_AT", "order": "DESCENDING"},
+                sortBy={"attribute": "STARTED_AT", "order": "DESCENDING"},
             )
             jobs = response.get("ingestionJobSummaries", [])
             if jobs:

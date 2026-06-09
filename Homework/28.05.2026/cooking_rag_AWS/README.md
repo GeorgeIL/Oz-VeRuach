@@ -19,31 +19,31 @@ recipes, suggestions and answers.
 ## Architecture
 
 ```
-┌─────────────┐   JWT cookie    ┌───────────────────────────────────────────┐
-│   Browser   │ ◄─────────────► │   Flask 3 (app.py)                        │
-│ (HTML/CSS/  │                 │   Blueprints: /auth /recipes /chat /pantry│
-│    JS)      │                 └──────────────────┬────────────────────────┘
-└─────────────┘                                    │
-                    ┌──────────────────────────────┼──────────────────────────┐
-                    │                              │                          │
-       ┌────────────▼────────────┐    ┌────────────▼──────────┐  ┌────────────▼──────────┐
-       │  Aurora PostgreSQL 17   │    │   RAG Engine          │  │  Amazon Bedrock       │
-       │  (AWS RDS)              │    │   (rag/engine.py)     │  │                       │
-       │                         │    │                       │  │  Nova Lite 1.0 (LLM)  │
-       │  users, recipes         │    │  1. retrieve_chunks() │  │  - Chat / RAG answers │
-       │  conversations, messages│    │     via Bedrock KB    │  │  - Recipe parsing     │
-       │  pantry, favorites      │    │  2. ask_chef()        │  │    from uploads       │
-       │                         │    │     Converse API      │  └───────────────────────┘
-       │  IAM token auth         │    │  3. sync_knowledge    │
-       │  ThreadedConnectionPool │    │     _base() on upload │  ┌───────────────────────┐
-       │  14-min token cache     │    └───────────────────────┘  │  Amazon S3            │
-       └─────────────────────────┘                                                                                                │  recipes/catalog/*.md │
-                                                                 │  recipes/<slug>.md    │
-                                                                 │  (KB data source)     │
-                                                                 └───────────────────────┘
+┌─────────────┐   JWT cookie    ┌────────────────────────────────────────────────────────────┐
+│   Browser   │ ◄─────────────► │   Flask 3 on EC2 (Docker, port 5001)                       │
+│ HTML/CSS/JS │                 │   /auth  /recipes  /chat  /pantry  /buddies                │
+└─────────────┘                 └───────┬──────────────────────────────────────────────────┘
+                                        │
+         ┌──────────────────────────────┼──────────────────────────────┐
+         │                              │                              │
+┌────────▼─────────┐         ┌──────────▼──────────┐        ┌─────────▼──────────┐
+│ Aurora PostgreSQL│         │  Amazon Bedrock       │        │  Amazon S3           │
+│ (RDS, IAM auth)  │         │                       │        │  recipes/catalog/    │
+│ users, recipes,  │         │  Agent (Chef AI chat) │        │  *.md + images/      │
+│ chat, pantry,    │         │  KB (semantic search) │        │  (KB data source)    │
+│ buddies          │         │  Nova Lite (Converse) │        └──────────────────────┘
+└──────────────────┘         │  - PDF/TXT parsing    │
+                             │  - Buddy email body   │        ┌──────────────────────┐
+                             └──────────┬────────────┘        │  Google Gemini API   │
+                                        │                       │  (recipe photos)     │
+                             ┌──────────▼────────────┐        └──────────────────────┘
+                             │  Lambda               │
+                             │  - Agent action group │◄── Meteosource (weather/time)
+                             │  - Buddy email + SES  │
+                             └───────────────────────┘
 
-Deployment: Docker container on EC2 Ubuntu 24.04 (t3.micro, 20 GB)
-            IAM instance role → no credentials stored on the server
+Deployment: Docker on EC2 Ubuntu 24.04 (t3.micro, 20 GB)
+            IAM instance role → no AWS credentials in env.ec2
 ```
 
 ### Key Components
@@ -52,28 +52,179 @@ Deployment: Docker container on EC2 Ubuntu 24.04 (t3.micro, 20 GB)
 | ------------- | ------------------------------------------ | ------------------------------------------------------------ |
 | Web framework | Flask 3 + Blueprints                       | Routing, auth, template rendering                            |
 | Database      | Aurora PostgreSQL 17 (AWS RDS)             | Users, recipes, conversations, messages, pantry, favorites   |
-| DB auth       | IAM token (boto3 `generate_db_auth_token`) | No static passwords - tokens expire in 15 min, cached 14 min |
+| DB auth       | IAM token (boto3 `generate_db_auth_token`) | No static passwords — tokens expire in 15 min, cached 14 min  |
 | Auth          | PyJWT + bcrypt                             | Stateless JWT tokens in httponly cookies                     |
-| RAG retrieval | Amazon Bedrock Knowledge Base              | Semantic search over S3-stored recipe `.md` files            |
-| LLM           | Amazon Nova Lite 1.0 (Bedrock)             | Chat answers, recipe generation, PDF parsing                 |
-| File storage  | Amazon S3                                  | User-uploaded recipe markdown files                          |
-| Frontend      | Jinja2 + vanilla JS + marked.js            | Chat UI, recipe CRUD, pantry management, dark mode           |
+| Chef AI chat  | Amazon Bedrock **Agent**                   | `/chat/ask` → `invoke_agent` with KB + action Lambda tools |
+| RAG / sync    | Bedrock Knowledge Base + `rag/engine.py`   | KB ingestion on upload; `retrieve_chunks()` used by Lambda   |
+| LLM (direct)  | Amazon Nova Lite 1.0 (Bedrock Converse)    | PDF/TXT parsing, buddy email composition — not main chat     |
+| File storage  | Amazon S3                                  | Recipe markdown + generated images                           |
+| Email         | Lambda + Amazon SES                        | Share recipe with cooking buddies                            |
+| Images        | Google Gemini (optional)                   | Background food photo after recipe save                      |
+| Frontend      | Jinja2 + vanilla JS + marked.js            | Chat UI, recipe CRUD, pantry, dark mode                      |
 | Container     | Docker (python:3.11-slim)                  | Reproducible deployment                                      |
 | Hosting       | EC2 Ubuntu 24.04 t3.micro                  | IAM instance role provides all AWS credentials               |
 
-### Request Flow (Chat)
+### AWS stack diagram
 
-1. User sends a question → `/chat/ask`
-2. `retrieve_chunks()` queries the Bedrock Knowledge Base with the question text
-3. Relevant recipe chunks are returned as grounding context
-4. `ask_chef()` calls `bedrock-runtime.converse()` with system prompt + history
-   - chunks + pantry contents
-5. Nova Lite generates a response; if it proposes a new recipe, a hidden
-   `recipe-json` block is appended
-6. The JS frontend detects the block, hides it, and shows an "Add to My
-   Cookbook" button
-7. Both messages are written to Aurora with `clock_timestamp()` to preserve
-   order
+How the browser, Flask, and AWS services connect:
+
+```mermaid
+flowchart TB
+  subgraph UI["Browser"]
+    Pages["Recipes / Pantry / Buddies / Chef AI"]
+  end
+
+  subgraph EC2["EC2 Docker — Flask :5001"]
+    Auth["JWT auth"]
+    Chat["/chat/ask"]
+    Recipes["/recipes/*"]
+    ShareEP["/chat/agent/share-recipe"]
+  end
+
+  subgraph Data["Data layer"]
+    RDS["Aurora PostgreSQL"]
+    S3["S3 recipes/catalog/*.md"]
+  end
+
+  subgraph Bedrock["Amazon Bedrock"]
+    Agent["Bedrock Agent\n(Nova Lite + instructions)"]
+    KB["Knowledge Base\n(vector search on S3)"]
+    Nova["Nova Lite Converse\n(PDF parse, email text)"]
+  end
+
+  subgraph Lambda["Lambda"]
+    Action["Action group\nlmbda.py"]
+    Email["cooking-rag-buddy-email"]
+  end
+
+  SES["Amazon SES"]
+  Gemini["Google Gemini\n(recipe images)"]
+  Metro["Meteosource API"]
+
+  Pages --> Auth
+  Auth --> Chat
+  Auth --> Recipes
+  Chat --> RDS
+  Chat --> Agent
+  Recipes --> RDS
+  Recipes --> S3
+  Recipes --> Nova
+  Recipes --> Gemini
+  Agent --> KB
+  KB --> S3
+  Agent --> Action
+  Action --> KB
+  Action --> Metro
+  Action -->|ShareRecipeWithBuddy| ShareEP
+  ShareEP --> Email
+  Email --> Nova
+  Email --> SES
+  Recipes -->|sync on save/delete| KB
+```
+
+### Chef AI page — how the agent works
+
+Chef AI (`/chat/`) does **not** call Nova Lite directly from Flask. Each message goes through a **Bedrock Agent** you configure in the AWS console.
+
+```mermaid
+sequenceDiagram
+  participant U as User browser
+  participant F as Flask /chat/ask
+  participant RDS as Aurora
+  participant A as Bedrock Agent
+  participant KB as Knowledge Base
+  participant L as Action Lambda (2 tools)
+  participant FlaskTool as Flask /agent/share-recipe
+  participant E as Buddy email Lambda
+  participant SES as Amazon SES
+
+  U->>F: POST question
+  F->>RDS: Load pantry, history, buddies, last recipe
+  F->>F: Named recipe → S3 markdown (active_recipe)
+  F->>A: invoke_agent + promptSessionAttributes
+  Note over F,A: pantry, buddy_names, active_recipe, last_recipe_*
+  A->>KB: Retrieve cookbook chunks
+  alt Tool 1 — recipe by time and location
+    A->>L: SuggestDishForTimeAndWeather(location, meal_hint?)
+    L->>Metro: Meteosource weather
+    L->>KB: bedrock:Retrieve
+    L-->>A: time + weather + recipe names
+  else Tool 2 — share recipe by email
+    A->>L: ShareRecipeWithBuddy(buddy_name, recipe_title, recipe_body)
+    L->>FlaskTool: POST + AGENT_TOOL_SECRET
+    FlaskTool->>RDS: Resolve buddy name → email
+    FlaskTool->>E: Invoke async
+    E->>SES: Send email
+    L-->>A: Email queued
+  end
+  A-->>F: Final answer
+  F->>RDS: Save messages
+  F-->>U: JSON answer
+```
+
+**Two agent tools (action group / “MCPs”):**
+
+| Tool | When the agent calls it | What it does |
+| ---- | ----------------------- | ------------ |
+| **SuggestDishForTimeAndWeather** | User asks what to cook by time, weather, or city | Lambda → Meteosource + KB retrieve → recipe names |
+| **ShareRecipeWithBuddy** | User asks to email/share a recipe to a buddy | Lambda → Flask `/chat/agent/share-recipe` → buddy email Lambda → SES |
+
+OpenAPI schema: [`docs/agent_action_group_openapi.yaml`](docs/agent_action_group_openapi.yaml)  
+Agent instructions (copy-paste): [`docs/bedrock_agent_instructions.md`](docs/bedrock_agent_instructions.md)
+
+**Session memory:** Bedrock keeps its own session via `conversations.agent_session_id`. **Clear history** rotates that ID.
+
+**Share to buddy:** Handled by the **agent** calling `ShareRecipeWithBuddy`. Flask injects `last_recipe_title`, `last_recipe_body`, and `buddy_names` each turn so the agent knows what to send.
+
+### PDF / TXT → app recipe
+
+Upload flow (`POST /recipes/upload`):
+
+```mermaid
+flowchart LR
+  A["User selects .pdf or .txt"] --> B["PyPDF2 extracts text"]
+  B --> C["parse_recipe_from_text()\nNova Lite Converse"]
+  C --> D["Structured JSON:\ntitle, ingredients, steps, tags"]
+  D --> E["Save .md to S3\n+ row in RDS"]
+  E --> F["sync_knowledge_base()"]
+  F --> G["Gemini image thread\n(optional)"]
+  G --> H["Redirect to recipe page"]
+```
+
+1. Flask reads the file (max 10 MB; PDF must have selectable text).
+2. **`parse_recipe_from_text()`** sends the first ~4000 characters to **Nova Lite** with a strict extraction prompt (`_PARSE_PROMPT` in `rag/engine.py`) — temperature 0.1 for reliable JSON.
+3. On success, the app builds markdown, uploads to `recipes/catalog/{slug}.md`, inserts into RDS, triggers **KB sync**, and optionally generates a Gemini thumbnail in a background thread.
+
+This path is separate from Chef AI chat: upload uses **direct Converse**, not the Bedrock Agent.
+
+### "Add to My Cookbook" button in chat
+
+When the assistant **invents a brand-new recipe** (not one already in the cookbook), the model should append a hidden machine-readable block:
+
+````
+```recipe-json
+{"title":"…","description":"…","ingredients":[…],"steps":[…],"notes":"…","tags":[…]}
+```
+````
+
+**Frontend (`static/js/chat.js`):**
+
+1. `extractRecipeJsonBlocks()` strips fenced `recipe-json` from the displayed markdown.
+2. If JSON is valid (title + ingredients + steps), a **Add to My Cookbook** button appears.
+3. Click → `POST /recipes/from-chat` → saves S3 + RDS + KB sync + optional Gemini image → opens the new recipe in a new tab.
+
+**Important for Bedrock Agent:** Chat uses the agent, not `ask_chef()`. The **`SYSTEM_PROMPT` in `rag/engine.py`** documents the exact `recipe-json` rules for the legacy Converse path. Copy those rules into your **agent instructions** in the Bedrock console so new-recipe replies include the fence; otherwise the button will not appear.
+
+### Why the prompts are structured this way
+
+| Prompt | Where | Purpose |
+| ------ | ----- | ------- |
+| **`SYSTEM_PROMPT`** (`rag/engine.py`) | Legacy Converse chat + reference for agent instructions | Ground answers in cookbook context; **only** emit `recipe-json` when inventing a new recipe (never when summarising catalog entries) — prevents duplicate saves and bogus "Add to cookbook" buttons |
+| **`_PARSE_PROMPT`** | PDF/TXT upload | Force a single JSON object with fixed keys — no markdown fences, no prose — so parsing is deterministic |
+| **Agent instructions** (Bedrock console) | Chef AI chat | Route weather/time questions to action Lambda; use KB for cookbook Q&A; list valid buddies from `promptSessionAttributes.buddy_names` |
+| **Buddy email Lambda prompt** | `lambda/buddy_email/` | Turn recipe markdown into a friendly email body via Nova Lite before SES sends it |
+
+Grounding rules exist because RAG chunks are excerpts: without "use only authoritative context" instructions, the model merges recipes or invents ingredients. The narrow `recipe-json` rule exists because the UI treats that fence as a **save trigger** — showing it for existing recipes would confuse users with a useless save button.
 
 ---
 
@@ -91,7 +242,7 @@ Deployment: Docker container on EC2 Ubuntu 24.04 (t3.micro, 20 GB)
 3. Apply the schema from your local machine (IAM admin credentials work):
 
 ```bash
-cd cooking_rag
+cd cooking_rag_AWS
 export AWS_ACCESS_KEY_ID=...   AWS_SECRET_ACCESS_KEY=...   AWS_REGION=us-east-1
 
 python3 -c "
@@ -228,19 +379,26 @@ database (the `CREATE TABLE IF NOT EXISTS` block is safe to re-run).
 
 ### 3b - Bedrock Agent (Chef AI chat)
 
-Chef AI chat uses a **Bedrock Agent** (not direct Converse API). Extend your existing
-test agent as follows:
+Chef AI uses a **Bedrock Agent** with **two action-group tools** (assignment “MCPs”):
+
+1. **`SuggestDishForTimeAndWeather`** — recipe suggestions by time, weather, and location  
+2. **`ShareRecipeWithBuddy`** — email a recipe to a cooking buddy  
+
+#### Setup checklist
 
 1. **Attach the cooking Knowledge Base** (`BEDROCK_KB_ID`) to the agent.
-2. **Replace the action group functions** on the same Lambda (`lmbda.py` at project root):
-   - `SuggestDishForTimeAndWeather` — params: `location` (required), `meal_hint` (optional)
-   - `ShareRecipeWithBuddy` — params: `buddy_name`, `recipe_title`, `recipe_body`
-3. **Update agent instructions** (example themes):
-   - Answer cookbook questions from the attached KB.
-   - Call `SuggestDishForTimeAndWeather` when the user asks what to cook based on time, weather, or location (Meteosource `place_id`, e.g. `paris`).
-   - Call `ShareRecipeWithBuddy` when the user asks to email/share a recipe to a buddy by name; use recipe text from the current conversation.
-   - Valid buddy names are in `promptSessionAttributes.buddy_names`.
-4. Note the **Agent ID** and **Alias ID** from the Bedrock console.
+2. **Action group** — upload [`docs/agent_action_group_openapi.yaml`](docs/agent_action_group_openapi.yaml) in the Bedrock console (or define the same two `operationId` values manually). Point the executor to your action Lambda.
+3. **Deploy action Lambda** — [`lmbda.py`](lmbda.py), handler `dummy_lambda.lambda_handler`:
+
+```bash
+chmod +x scripts/deploy_agent_lambda.sh
+./scripts/deploy_agent_lambda.sh action_group_quick_start_38hbb-hwq2r
+```
+
+4. **Agent instructions** — paste from [`docs/bedrock_agent_instructions.md`](docs/bedrock_agent_instructions.md).
+5. Note **Agent ID** and **Alias ID** for `env.ec2`.
+
+Legacy names `GetTime` / `GetWeather` still work in `lmbda.py` and route to the same logic, but the action group should expose the two tools above for the assignment.
 
 #### Action Lambda environment
 
@@ -259,10 +417,13 @@ Or manually: copy `lmbda.py` → `dummy_lambda.py`, zip, upload via console or `
 ```
 BEDROCK_KB_ID=<same as Flask>
 METEOSOURCE_API_KEY=<your meteosource key>
-FLASK_TOOL_URL=https://<your-app-host>/chat/agent/share-recipe
+FLASK_TOOL_URL=http://<your-ec2-public-ip-or-domain>:5001/chat/agent/share-recipe
 AGENT_TOOL_SECRET=<same random secret as Flask>
 AWS_REGION=us-east-1
 ```
+
+> **EC2:** `FLASK_TOOL_URL` must be reachable from AWS Lambda (public IP or domain), **not**
+> `http://127.0.0.1:5001`. Match `APP_BASE_URL` in Flask `env.ec2`.
 
 Lambda IAM needs `bedrock:Retrieve` on the knowledge base ARN.
 
@@ -274,26 +435,33 @@ Add to `.env` (local) and `env.ec2` (production):
 BEDROCK_AGENT_ID=<agent id from console>
 BEDROCK_AGENT_ALIAS_ID=<alias id from console>
 AGENT_TOOL_SECRET=<shared secret with action Lambda>
-APP_BASE_URL=http://127.0.0.1:5001
+APP_BASE_URL=http://<your-ec2-public-ip>:5001
 METEOSOURCE_API_KEY=<optional; used by Lambda, not Flask>
 ```
 
+> **EC2:** Set `APP_BASE_URL` to the URL users (and Lambda) use to reach the app, e.g.
+> `http://54.x.x.x:5001`. Rebuild the Docker image after editing `env.ec2`.
+
 EC2 IAM also needs `bedrock:InvokeAgent` on `arn:aws:bedrock:us-east-1:<account>:agent-alias/<agent-id>/<alias-id>`.
 
-Flask passes `user_id`, pantry, buddy names, and authoritative recipe markdown via
-agent session attributes on each `/chat/ask` request. **Share-to-buddy requests**
-(e.g. "send this recipe to Sarah") are handled directly in Flask using your saved
-buddies and the last recipe in chat — no agent tool call required. The share tool
-Lambda + `POST /chat/agent/share-recipe` path remains available if you add
-`ShareRecipeWithBuddy` to the action group later.
+Flask passes these **promptSessionAttributes** on every `/chat/ask`:
+
+| Attribute | Purpose |
+| --------- | ------- |
+| `pantry` | User's pantry ingredients |
+| `buddy_names` | Comma-separated cooking buddy names (for ShareRecipeWithBuddy) |
+| `active_recipe` | Full S3 markdown when user names a cookbook recipe |
+| `last_recipe_title` / `last_recipe_body` | Most recent recipe in chat (for “share this”) |
+
+Share emails flow: **Agent** → action Lambda `ShareRecipeWithBuddy` → `POST /chat/agent/share-recipe` (secured with `AGENT_TOOL_SECRET`) → buddy email Lambda → SES.
 
 #### Verification
 
 | User message | Expected |
 | ------------ | -------- |
-| What should I cook in Paris right now? | Agent calls weather/time tool → KB-grounded dish names |
-| Tell me about Agua Fresca | KB + injected authoritative recipe context |
-| Email that recipe to Sarah | Agent calls share tool → email queued via SES |
+| What should I cook in Paris right now? | Agent calls **SuggestDishForTimeAndWeather** → KB-grounded dish names |
+| Tell me about Agua Fresca | KB + `active_recipe` authoritative markdown from S3 |
+| Email that recipe to Sarah | Agent calls **ShareRecipeWithBuddy** → SES email queued |
 
 #### Troubleshooting
 
@@ -303,7 +471,10 @@ Lambda + `POST /chat/agent/share-recipe` path remains available if you add
 | "Sorry, I cannot provide the current time" | Agent received `Unknown function: GetTime` from Lambda | Same as above — redeploy Lambda |
 | Time works but Paris recipe suggestion fails | Agent calls `GetTime` instead of `GetWeather` / `SuggestDishForTimeAndWeather` | Update **agent instructions**: for recipe suggestions by location, call `GetWeather` or `SuggestDishForTimeAndWeather` with `location=paris` (not `GetTime`) |
 | App says "I can only provide the current date and time" but AWS console test works | Stale **Bedrock agent session** — app used `conversation.id` as `sessionId`; failed tool calls stay in agent memory even after Clear history | Fixed: app uses `conversations.agent_session_id` (rotated on clear + new column on upgrade). Restart Flask after deploy, or click **Clear history** once |
-| Lambda `SuggestDishForTimeAndWeather` returns no recipes | Missing `BEDROCK_KB_ID` env on action Lambda or missing `bedrock:Retrieve` IAM | Set env var and add retrieve permission on the Lambda role |
+| `Bedrock agent returned an empty response` or generic "unable to assist" | Production alias (`GL2MCCRYP2`) still routes to **old version 5** (GetTime/GetWeather only). DRAFT has the correct tools | App auto-retries **`TSTALIASID`** (DRAFT). For production: Bedrock console → **Prepare** agent, then `./scripts/publish_bedrock_agent.sh` to point alias at the new version |
+| Share email fails from agent | `FLASK_TOOL_URL` points to localhost or wrong host | Set Lambda env to `http://<ec2-public-ip>:5001/chat/agent/share-recipe`; security group must allow inbound 5001 |
+| Agent never calls ShareRecipeWithBuddy | Action group missing function or weak instructions | Upload OpenAPI from `docs/`; paste `docs/bedrock_agent_instructions.md` |
+| Lambda `SuggestDishForTimeAndWeather` returns no recipes | Missing `BEDROCK_KB_ID` on action Lambda or missing `bedrock:Retrieve` IAM | Set env var and add retrieve permission on the Lambda role |
 
 **IAM note:** If CloudWatch shows the Lambda executing and returning HTTP 200, IAM is fine for invocation. Admin console access is separate from the IAM user/role your Flask app uses locally (`AWS_ACCESS_KEY_ID` in `.env`) or on EC2 (instance role).
 
@@ -331,6 +502,25 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 aws iam put-role-policy --role-name cooking-rag-ec2-role \
   --policy-name RdsIamConnect \
   --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"rds-db:connect\",\"Resource\":\"arn:aws:rds-db:us-east-1:${ACCOUNT_ID}:dbuser:*/postgres\"}]}"
+
+# Inline policy: invoke Bedrock Agent + buddy email Lambda
+aws iam put-role-policy --role-name cooking-rag-ec2-role \
+  --policy-name CookingRagBedrockAndLambda \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": [\"bedrock:InvokeAgent\", \"bedrock-agent:StartIngestionJob\", \"bedrock-agent:ListIngestionJobs\", \"bedrock-agent:ListDataSources\"],
+        \"Resource\": \"*\"
+      },
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": \"lambda:InvokeFunction\",
+        \"Resource\": \"arn:aws:lambda:us-east-1:${ACCOUNT_ID}:function:cooking-rag-buddy-email\"
+      }
+    ]
+  }"
 
 # Create instance profile
 aws iam create-instance-profile --instance-profile-name cooking-rag-ec2-profile
@@ -408,11 +598,11 @@ BEDROCK_KB_SYNC_ALL=true
 BEDROCK_AGENT_ID=<your_agent_id>
 BEDROCK_AGENT_ALIAS_ID=<your_agent_alias_id>
 AGENT_TOOL_SECRET=<shared_secret_with_action_lambda>
-APP_BASE_URL=https://<your-ec2-host>:5001
+APP_BASE_URL=http://<your-ec2-public-ip>:5001
 METEOSOURCE_API_KEY=<your_meteosource_key>
 # Optional: cooking buddies email via Lambda + SES
-# BUDDY_EMAIL_LAMBDA_NAME=cooking-rag-buddy-email
-# SES_FROM_EMAIL=you@verified-domain.com
+BUDDY_EMAIL_LAMBDA_NAME=cooking-rag-buddy-email
+SES_FROM_EMAIL=you@your-verified-domain.com
 # Optional: AI-generated recipe photos (do not commit the key)
 # GEMINI_API_KEY=
 # GEMINI_MODEL=gemini-3.1-flash-image
@@ -426,6 +616,10 @@ RDS_USER=postgres
 
 > Use the **cluster writer endpoint** (e.g.
 > `database-1.cluster-<id>.us-east-1.rds.amazonaws.com`).
+>
+> **Before building the image:** replace `<your-ec2-public-ip>` in `APP_BASE_URL`
+> with your instance's public IP (or domain). The action Lambda's `FLASK_TOOL_URL`
+> must use the same host. Rebuild Docker after any `env.ec2` change.
 
 ### Step 2 - Build and push the Docker image
 
@@ -556,7 +750,7 @@ ssh -i ~/Downloads/<your-key>.pem ubuntu@<public-ip> \
 
 ```bash
 git clone <repository-url>
-cd cooking_rag
+cd cooking_rag_AWS
 ```
 
 Create `.env` (gitignored - never commit it):
@@ -638,9 +832,10 @@ cooking_rag_AWS/
 │   └── buddies.py
 ├── services/
 │   ├── bedrock_agent.py    # invoke_chef_agent() wrapper
+│   ├── buddy_share.py      # Share-to-buddy intent before agent runs
 │   ├── recipe_lookup.py    # Authoritative S3 recipe context for chat
-│   ├── s3_recipes.py         # S3 recipe index + image URL resolution
-│   └── recipe_images.py      # Gemini generation, S3 upload, image overrides
+│   ├── s3_recipes.py       # S3 recipe index + image URL resolution
+│   └── recipe_images.py    # Gemini generation, S3 upload, image overrides
 ├── lambda/
 │   └── buddy_email/        # Bedrock + SES email Lambda
 ├── scripts/
@@ -669,8 +864,8 @@ cooking_rag_AWS/
   which is now documented in the deployment guide.
 - **Knowledge Base auto-sync** - every recipe upload or deletion triggers a
   Bedrock KB sync (`BEDROCK_KB_SYNC_ALL=true` syncs all data sources). Chef AI
-  uses hybrid RAG: full S3 markdown for named recipes plus KB chunks for open
-  questions, with expanded retrieval queries and full chat history.
+  uses a Bedrock Agent with attached KB, plus Flask-injected authoritative S3
+  markdown for named recipes (`recipe_lookup.py`).
 
 ### Challenges Encountered During the AWS Refactor
 

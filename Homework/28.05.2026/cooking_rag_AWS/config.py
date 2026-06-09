@@ -30,6 +30,10 @@ class Config:
     # Bedrock Agent (Chef AI chat)
     BEDROCK_AGENT_ID = os.getenv("BEDROCK_AGENT_ID", "")
     BEDROCK_AGENT_ALIAS_ID = os.getenv("BEDROCK_AGENT_ALIAS_ID", "")
+    # If the production alias points at an old prepared version, retry TSTALIASID (DRAFT).
+    BEDROCK_AGENT_FALLBACK_TO_DRAFT = os.getenv(
+        "BEDROCK_AGENT_FALLBACK_TO_DRAFT", "true"
+    ).lower() in ("1", "true", "yes")
     AGENT_TOOL_SECRET = os.getenv("AGENT_TOOL_SECRET", "")
     APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:5000")
     METEOSOURCE_API_KEY = os.getenv("METEOSOURCE_API_KEY", "")
