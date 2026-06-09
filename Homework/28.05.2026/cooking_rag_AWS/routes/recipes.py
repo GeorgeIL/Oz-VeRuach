@@ -306,8 +306,8 @@ def create_recipe():
         )
     conn.commit()
     s3_recipes.invalidate_index_cache()
-    rag.sync_knowledge_base()
     recipe_images.trigger_generation_after_create(conn, slug, title)
+    rag.sync_knowledge_base()
 
     return (
         jsonify(
@@ -582,8 +582,8 @@ def recipe_from_chat():
         raise
 
     s3_recipes.invalidate_index_cache()
-    rag.sync_knowledge_base()
     recipe_images.trigger_generation_after_create(conn, slug, title)
+    rag.sync_knowledge_base()
 
     return (
         jsonify(
@@ -651,6 +651,10 @@ def recipe_image_status(slug):
     conn = get_db()
     if not _recipe_exists(conn, slug):
         return jsonify({"error": "Recipe not found"}), 404
+
+    state = s3_recipes.get_image_state(slug, conn)
+    if state["status"] == "pending":
+        recipe_images.ensure_generation(conn, slug, _recipe_title(conn, slug))
 
     state = s3_recipes.get_image_state(slug, conn)
     return jsonify({"status": state["status"], "image_url": state["image_url"]})
@@ -852,7 +856,7 @@ def upload_recipe():
         )
     conn.commit()
     s3_recipes.invalidate_index_cache()
-    rag.sync_knowledge_base()
     recipe_images.trigger_generation_after_create(conn, slug, title)
+    rag.sync_knowledge_base()
 
     return redirect(url_for("recipes.view_recipe", slug=slug))

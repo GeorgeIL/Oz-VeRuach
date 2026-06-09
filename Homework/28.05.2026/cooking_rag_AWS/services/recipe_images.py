@@ -9,6 +9,7 @@ from typing import TypedDict
 
 import boto3
 from google import genai
+from google.genai import types
 
 from config import Config
 from db import _checkout, _get_pool
@@ -18,9 +19,14 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_PREFIX = "catalog/images/"
 _MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+_GEMINI_TIMEOUT_MS = 180_000
+_STALE_PENDING_SECONDS = 120
+
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 _s3_client = None
+_active_slugs: set[str] = set()
+_gen_lock = threading.Lock()
 
 
 class ImageState(TypedDict):
@@ -239,6 +245,9 @@ def generate_image(title: str, instructions: str = "") -> tuple[bytes, str, str]
     response = client.models.generate_content(
         model=Config.GEMINI_MODEL,
         contents=[prompt],
+        config=types.GenerateContentConfig(
+            http_options=types.HttpOptions(timeout=_GEMINI_TIMEOUT_MS),
+        ),
     )
 
     for part in response.parts:
@@ -254,11 +263,25 @@ def generate_image(title: str, instructions: str = "") -> tuple[bytes, str, str]
 def _run_generation(slug: str, title: str, instructions: str = "") -> None:
     conn = _checkout()
     try:
-        image_bytes, content_type, ext = generate_image(title, instructions)
-        s3_key, url = upload_image_bytes(slug, image_bytes, content_type, ext)
-        save_image(conn, slug, url, s3_key, "ready")
-        s3_recipes.invalidate_index_cache()
-        logger.info("Generated recipe image for %s", slug)
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                image_bytes, content_type, ext = generate_image(title, instructions)
+                s3_key, url = upload_image_bytes(slug, image_bytes, content_type, ext)
+                save_image(conn, slug, url, s3_key, "ready")
+                s3_recipes.invalidate_index_cache()
+                logger.info("Generated recipe image for %s", slug)
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0 and "DEADLINE_EXCEEDED" in str(exc):
+                    logger.warning(
+                        "Gemini timeout for %s — retrying once", slug
+                    )
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
     except Exception as exc:
         logger.exception("Recipe image generation failed for %s: %s", slug, exc)
         try:
@@ -266,21 +289,88 @@ def _run_generation(slug: str, title: str, instructions: str = "") -> None:
         except Exception:
             pass
     finally:
+        with _gen_lock:
+            _active_slugs.discard(slug)
         _get_pool().putconn(conn)
+
+
+def _start_generation_thread(slug: str, title: str, instructions: str = "") -> bool:
+    """Start a background generation job unless one is already running for slug."""
+    with _gen_lock:
+        if slug in _active_slugs:
+            return False
+        _active_slugs.add(slug)
+
+    thread = threading.Thread(
+        target=_run_generation,
+        args=(slug, title, instructions),
+        daemon=False,
+        name=f"recipe-image-{slug}",
+    )
+    thread.start()
+    return True
+
+
+def ensure_generation(conn, slug: str, title: str | None = None, instructions: str = "") -> None:
+    """
+    If slug is pending, ensure a generation worker is running.
+
+    Called after recipe create and from the status poll endpoint so jobs recover
+    when a daemon thread was lost to a container restart.
+    """
+    if not Config.GEMINI_API_KEY:
+        return
+
+    row = _load_image_row(conn, slug)
+    if not row or row.get("status") != "pending":
+        return
+
+    if not title:
+        with conn.cursor() as cur:
+            cur.execute("SELECT title FROM recipes WHERE slug = %s", (slug,))
+            recipe = cur.fetchone()
+        title = (recipe["title"] if recipe else slug.replace("-", " ").title())
+
+    _start_generation_thread(slug, title, instructions)
+
+
+def recover_stale_pending(max_age_seconds: int = _STALE_PENDING_SECONDS) -> int:
+    """Re-queue pending images left behind by a crashed or restarted process."""
+    if not Config.GEMINI_API_KEY:
+        return 0
+
+    conn = _checkout()
+    restarted = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ri.slug, COALESCE(r.title, ri.slug) AS title
+                FROM recipe_images ri
+                LEFT JOIN recipes r ON r.slug = ri.slug
+                WHERE ri.status = 'pending'
+                  AND ri.updated_at < NOW() - (%s * INTERVAL '1 second')
+                """,
+                (max_age_seconds,),
+            )
+            rows = cur.fetchall()
+
+        for row in rows:
+            slug = row["slug"]
+            title = row["title"]
+            if _start_generation_thread(slug, title):
+                restarted += 1
+                logger.info("Restarted stale image generation for %s", slug)
+    finally:
+        _get_pool().putconn(conn)
+    return restarted
 
 
 def schedule_generation(slug: str, title: str, instructions: str = "") -> None:
     if not Config.GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY not set — skipping image generation for %s", slug)
         return
-
-    thread = threading.Thread(
-        target=_run_generation,
-        args=(slug, title, instructions),
-        daemon=True,
-        name=f"recipe-image-{slug}",
-    )
-    thread.start()
+    _start_generation_thread(slug, title, instructions)
 
 
 def trigger_generation_after_create(conn, slug: str, title: str) -> None:

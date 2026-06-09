@@ -1,4 +1,5 @@
 from flask import Flask, redirect, render_template, url_for
+import os
 
 from auth_utils import get_current_user
 from config import Config
@@ -8,6 +9,7 @@ from routes.chat import chat_bp
 from routes.buddies import buddies_bp
 from routes.pantry import pantry_bp
 from routes.recipes import recipes_bp
+from services import recipe_images
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -81,4 +83,8 @@ def server_error(e):
 if __name__ == "__main__":
     init_schema()
     print("Schema initialised.")
-    app.run(debug=True, host="0.0.0.0", port=5001)
+    restarted = recipe_images.recover_stale_pending()
+    if restarted:
+        print(f"Restarted {restarted} stale recipe image job(s).")
+    debug = os.getenv("FLASK_DEBUG", "false").lower() in ("1", "true", "yes")
+    app.run(debug=debug, host="0.0.0.0", port=5001)
