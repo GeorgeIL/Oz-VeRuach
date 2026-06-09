@@ -403,9 +403,22 @@ def process_answer(
     block = _find_recipe_block(answer)
     if block:
         data, start, end = block
-        rendered = render_recipe_markdown(data)
-        display = (answer[:start].rstrip() + "\n\n" + rendered + "\n" + answer[end:].lstrip()).strip()
-        return display, _annotate_saved(data, conn, user_id)
+        before = answer[:start].rstrip()
+        after = answer[end:].lstrip()
+        # The agent typically writes the full human-readable recipe AND appends a
+        # machine-readable recipe-json block. If the visible text already contains
+        # the recipe, just strip the JSON block — rendering it again would show the
+        # recipe twice. Only render from JSON when the text lacks a full recipe.
+        if looks_like_full_recipe_answer(before):
+            display = before
+            if after:
+                display = f"{display}\n\n{after}"
+        else:
+            rendered = render_recipe_markdown(data)
+            display = before + "\n\n" + rendered
+            if after:
+                display = f"{display}\n{after}"
+        return display.strip(), _annotate_saved(data, conn, user_id)
 
     if not looks_like_full_recipe_answer(answer):
         return answer, None

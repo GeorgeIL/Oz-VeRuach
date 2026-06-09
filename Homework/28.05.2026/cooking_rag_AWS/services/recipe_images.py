@@ -261,37 +261,44 @@ def generate_image(title: str, instructions: str = "") -> tuple[bytes, str, str]
 
 
 def _run_generation(slug: str, title: str, instructions: str = "") -> None:
-    conn = _checkout()
+    conn = None
     try:
+        # Generate the image first (slow network call) so we hold a DB connection
+        # for as little time as possible and a stale-token checkout cannot strand
+        # an in-flight Gemini result.
         last_exc: Exception | None = None
+        image_bytes = content_type = ext = None
         for attempt in range(2):
             try:
                 image_bytes, content_type, ext = generate_image(title, instructions)
-                s3_key, url = upload_image_bytes(slug, image_bytes, content_type, ext)
-                save_image(conn, slug, url, s3_key, "ready")
-                s3_recipes.invalidate_index_cache()
-                logger.info("Generated recipe image for %s", slug)
-                return
+                break
             except Exception as exc:
                 last_exc = exc
                 if attempt == 0 and "DEADLINE_EXCEEDED" in str(exc):
-                    logger.warning(
-                        "Gemini timeout for %s — retrying once", slug
-                    )
+                    logger.warning("Gemini timeout for %s — retrying once", slug)
                     continue
                 raise
-        if last_exc:
-            raise last_exc
+        if image_bytes is None:
+            raise last_exc or RuntimeError("Image generation produced no data")
+
+        s3_key, url = upload_image_bytes(slug, image_bytes, content_type, ext)
+        conn = _checkout()
+        save_image(conn, slug, url, s3_key, "ready")
+        s3_recipes.invalidate_index_cache()
+        logger.info("Generated recipe image for %s", slug)
     except Exception as exc:
         logger.exception("Recipe image generation failed for %s: %s", slug, exc)
         try:
+            if conn is None:
+                conn = _checkout()
             mark_failed(conn, slug)
         except Exception:
-            pass
+            logger.warning("Could not mark image failed for %s", slug)
     finally:
         with _gen_lock:
             _active_slugs.discard(slug)
-        _get_pool().putconn(conn)
+        if conn is not None:
+            _get_pool().putconn(conn)
 
 
 def _start_generation_thread(slug: str, title: str, instructions: str = "") -> bool:
