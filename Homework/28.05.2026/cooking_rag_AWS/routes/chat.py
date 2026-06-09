@@ -204,7 +204,7 @@ def chat_page():
             (conv_id,),
         )
         messages = [dict(r) for r in cur.fetchall()]
-        cur.execute("SELECT COUNT(*) AS cnt FROM recipes")
+        cur.execute("SELECT COUNT(*) AS cnt FROM recipes WHERE author_id = %s", (user["sub"],))
         user_recipe_count = cur.fetchone()["cnt"]
     index_status = rag.get_index_status(user_recipe_count)
     return render_template(
@@ -255,11 +255,15 @@ def ask():
         )
         recent = [dict(r) for r in cur.fetchall()]
 
-    active_slugs = recipe_lookup.resolve_active_recipe_slugs(question, recent, conn)
-    authoritative = recipe_lookup.build_authoritative_context(active_slugs, conn)
+    active_slugs = recipe_lookup.resolve_active_recipe_slugs(
+        question, recent, conn, user_id=user["sub"]
+    )
+    authoritative = recipe_lookup.build_authoritative_context(
+        active_slugs, conn, user_id=user["sub"]
+    )
     buddy_names = _fetch_buddy_names(conn, user["sub"])
     buddy_contacts = _fetch_buddy_contacts(conn, user["sub"])
-    last_recipe = buddy_share.extract_recipe_from_history(recent, conn)
+    last_recipe = buddy_share.extract_recipe_from_history(recent, conn, user_id=user["sub"])
     last_recipe_title = ""
     last_recipe_body = ""
     if last_recipe:
@@ -296,7 +300,7 @@ def ask():
         return _chef_error_response(exc)
 
     display_answer, saveable_recipe = recipe_from_chat.process_answer(
-        answer, active_slugs, conn
+        answer, active_slugs, conn, user_id=user["sub"]
     )
 
     with conn.cursor() as cur:

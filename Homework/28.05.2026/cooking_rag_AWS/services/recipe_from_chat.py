@@ -102,18 +102,87 @@ def _normalize_list(raw) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
+_TAG_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "breakfast": ("breakfast", "brunch", "morning"),
+    "lunch": ("lunch", "midday"),
+    "dinner": ("dinner", "supper", "evening meal"),
+    "dessert": ("dessert", "sweet", "cake", "cookie", "brownie", "pie", "pudding"),
+    "snack": ("snack", "appetizer", "starter"),
+    "vegetarian": ("vegetarian", "veggie"),
+    "vegan": ("vegan", "plant-based"),
+    "chicken": ("chicken", "poultry"),
+    "beef": ("beef", "steak"),
+    "pork": ("pork", "bacon", "ham"),
+    "fish": ("fish", "salmon", "tuna", "seafood", "shrimp"),
+    "pasta": ("pasta", "noodle", "spaghetti", "lasagna"),
+    "soup": ("soup", "stew", "broth", "chowder"),
+    "salad": ("salad", "slaw"),
+    "baking": ("bake", "baked", "oven", "bread", "muffin"),
+    "grill": ("grill", "bbq", "barbecue"),
+    "quick": ("quick", "easy", "fast", "15-minute", "30-minute"),
+    "comfort": ("comfort", "hearty", "cozy"),
+}
+
+
+def infer_recipe_tags(
+    title: str,
+    description: str = "",
+    ingredients: list[str] | None = None,
+    notes: str = "",
+) -> list[str]:
+    """Derive display tags when the agent or parser did not supply any."""
+    text = " ".join(
+        [
+            title,
+            description,
+            notes,
+            " ".join(ingredients or []),
+        ]
+    ).lower()
+    tags: list[str] = []
+    for tag, keywords in _TAG_KEYWORDS.items():
+        if any(keyword in text for keyword in keywords):
+            tags.append(tag)
+    stop = {
+        "with",
+        "and",
+        "the",
+        "for",
+        "your",
+        "recipe",
+        "fresh",
+        "homemade",
+        "classic",
+        "simple",
+    }
+    for word in re.findall(r"[a-z]{4,}", title.lower()):
+        if word in stop or word in tags:
+            continue
+        tags.append(word)
+        if len(tags) >= 6:
+            break
+    return tags[:6]
+
+
 def _normalize_recipe_data(data: dict) -> dict:
     tags = data.get("tags") or []
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
     title = data.get("title") or data.get("name") or ""
+    title = str(title).strip()
+    description = str(data.get("description") or "").strip()
+    ingredients = _normalize_list(data.get("ingredients"))
+    notes = str(data.get("notes") or "").strip()
+    tags = [str(tag).strip().lower() for tag in tags if str(tag).strip()]
+    if not tags:
+        tags = infer_recipe_tags(title, description, ingredients, notes)
     return {
-        "title": str(title).strip(),
-        "description": str(data.get("description") or "").strip(),
-        "ingredients": _normalize_list(data.get("ingredients")),
+        "title": title,
+        "description": description,
+        "ingredients": ingredients,
         "steps": _normalize_steps(data.get("steps")),
-        "notes": str(data.get("notes") or "").strip(),
-        "tags": [str(tag).strip().lower() for tag in tags if str(tag).strip()],
+        "notes": notes,
+        "tags": tags,
     }
 
 
@@ -216,8 +285,8 @@ def markdown_to_recipe_data(text: str) -> dict | None:
     return _normalize_recipe_data(data) if _is_valid_recipe_data(data) else None
 
 
-def recipe_data_from_slug(slug: str, conn) -> dict | None:
-    block = recipe_lookup.load_recipe_context(slug, conn)
+def recipe_data_from_slug(slug: str, conn, user_id: str | None = None) -> dict | None:
+    block = recipe_lookup.load_recipe_context(slug, conn, user_id=user_id)
     if not block:
         return None
     return markdown_to_recipe_data(block)
@@ -256,7 +325,7 @@ def _title_in_text(title: str, text: str) -> bool:
     return norm_title in norm_text
 
 
-def _slug_for_answer(answer: str, active_slugs: list[str], conn) -> str | None:
+def _slug_for_answer(answer: str, active_slugs: list[str], conn, user_id: str | None) -> str | None:
     """
     Pick the catalog slug that matches the recipe actually shown in the answer.
 
@@ -264,7 +333,9 @@ def _slug_for_answer(answer: str, active_slugs: list[str], conn) -> str | None:
     "the first one" can resolve to the wrong suggestion. The added recipe must be the
     one the user is reading, so we match against the answer text first.
     """
-    detected = recipe_lookup.detect_recipe_slugs(answer, conn, max_results=5)
+    detected = recipe_lookup.detect_recipe_slugs(
+        answer, conn, max_results=5, user_id=user_id
+    )
 
     # Prefer a slug the question pointed at *only if* it also appears in the answer.
     for slug in active_slugs or []:
@@ -278,20 +349,27 @@ def _slug_for_answer(answer: str, active_slugs: list[str], conn) -> str | None:
     # catalog title uses hyphens (e.g. "Ceviche Estillo" vs "Ceviche-Estillo").
     # build_title_index is sorted longest-title-first, so the first hit is the best.
     norm_answer = re.sub(r"[\s\-]+", " ", (answer or "").lower())
-    for title, slug, _key in recipe_lookup.build_title_index(conn):
+    for title, slug, _key in recipe_lookup.build_title_index(conn, user_id=user_id):
         norm_title = re.sub(r"[\s\-]+", " ", title.lower()).strip()
         if len(norm_title) >= 6 and norm_title in norm_answer:
             return slug
 
     # Last resort: an active slug whose title literally appears in the answer.
     for slug in active_slugs or []:
-        data = recipe_data_from_slug(slug, conn)
+        data = recipe_data_from_slug(slug, conn, user_id=user_id)
         if data and _title_in_text(data["title"], answer):
             return slug
+
+    # User picked a numbered suggestion ("recipe 1"); trust the resolved slug even
+    # when the agent reply was truncated before the title appeared.
+    if len(active_slugs) == 1 and looks_like_full_recipe_answer(answer):
+        return active_slugs[0]
     return None
 
 
-def process_answer(answer: str, active_slugs: list[str], conn) -> tuple[str, dict | None]:
+def process_answer(
+    answer: str, active_slugs: list[str], conn, user_id: str | None = None
+) -> tuple[str, dict | None]:
     """
     Return (display_answer, recipe_or_None).
 
@@ -313,20 +391,23 @@ def process_answer(answer: str, active_slugs: list[str], conn) -> tuple[str, dic
         return answer, None
 
     # Identity comes from the answer, not the question-derived active_slugs.
-    slug = _slug_for_answer(answer, active_slugs, conn)
+    slug = _slug_for_answer(answer, active_slugs, conn, user_id)
     if slug:
-        data = recipe_data_from_slug(slug, conn)
-        if data and _title_in_text(data["title"], answer):
-            return answer, data
+        data = recipe_data_from_slug(slug, conn, user_id=user_id)
+        if data:
+            # Agent output is capped at ~1–8k tokens; always show the full S3 catalog entry.
+            return render_recipe_markdown(data), data
 
     parsed = markdown_to_recipe_data(answer)
     if parsed:
-        return answer, parsed
+        return render_recipe_markdown(parsed), parsed
 
     return answer, None
 
 
-def resolve_saveable_recipe(answer: str, active_slugs: list[str], conn) -> dict | None:
+def resolve_saveable_recipe(
+    answer: str, active_slugs: list[str], conn, user_id: str | None = None
+) -> dict | None:
     """Backwards-compatible helper returning only the recipe dict."""
-    _display, recipe = process_answer(answer, active_slugs, conn)
+    _display, recipe = process_answer(answer, active_slugs, conn, user_id=user_id)
     return recipe

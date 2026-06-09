@@ -203,7 +203,7 @@ def ask_chef(
         modelId=Config.NOVA_MODEL_ID,
         system=[{"text": system_text}],
         messages=messages,
-        inferenceConfig={"maxTokens": 1024, "temperature": temperature},
+        inferenceConfig={"maxTokens": Config.NOVA_MAX_OUTPUT_TOKENS, "temperature": temperature},
     )
     return response["output"]["message"]["content"][0]["text"]
 
@@ -223,7 +223,7 @@ def parse_recipe_from_text(raw_text: str) -> dict:
     response = runtime.converse(
         modelId=Config.NOVA_MODEL_ID,
         messages=[{"role": "user", "content": [{"text": prompt}]}],
-        inferenceConfig={"maxTokens": 1024, "temperature": 0.1},
+        inferenceConfig={"maxTokens": Config.NOVA_MAX_OUTPUT_TOKENS, "temperature": 0.1},
     )
     text = response["output"]["message"]["content"][0]["text"].strip()
     # Strip markdown fences if the model wrapped the JSON
@@ -269,18 +269,12 @@ def _get_in_progress_job_id(agent, data_source_id: str) -> str | None:
     response = agent.list_ingestion_jobs(
         knowledgeBaseId=Config.BEDROCK_KB_ID,
         dataSourceId=data_source_id,
-        filters=[
-            {
-                "attributeName": "STATUS",
-                "operator": "IN",
-                "values": ["STARTING", "IN_PROGRESS"],
-            }
-        ],
-        maxResults=1,
+        maxResults=5,
+        sortBy={"attribute": "STARTED_AT", "order": "DESCENDING"},
     )
-    jobs = response.get("ingestionJobSummaries", [])
-    if jobs:
-        return jobs[0].get("ingestionJobId")
+    for job in response.get("ingestionJobSummaries", []):
+        if job.get("status") in ("STARTING", "IN_PROGRESS"):
+            return job.get("ingestionJobId")
     return None
 
 

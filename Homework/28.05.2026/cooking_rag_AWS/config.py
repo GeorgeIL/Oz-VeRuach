@@ -26,6 +26,7 @@ class Config:
         "yes",
     )
     NOVA_MODEL_ID = os.getenv("NOVA_MODEL_ID", "amazon.nova-lite-v1:0")
+    NOVA_MAX_OUTPUT_TOKENS = int(os.getenv("NOVA_MAX_OUTPUT_TOKENS", "4096"))
 
     # Bedrock Agent (Chef AI chat)
     BEDROCK_AGENT_ID = os.getenv("BEDROCK_AGENT_ID", "")
@@ -34,6 +35,9 @@ class Config:
     BEDROCK_AGENT_FALLBACK_TO_DRAFT = os.getenv(
         "BEDROCK_AGENT_FALLBACK_TO_DRAFT", "true"
     ).lower() in ("1", "true", "yes")
+    BEDROCK_AGENT_MAX_OUTPUT_TOKENS = int(
+        os.getenv("BEDROCK_AGENT_MAX_OUTPUT_TOKENS", "8192")
+    )
     AGENT_TOOL_SECRET = os.getenv("AGENT_TOOL_SECRET", "")
     APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:5000")
     METEOSOURCE_API_KEY = os.getenv("METEOSOURCE_API_KEY", "")

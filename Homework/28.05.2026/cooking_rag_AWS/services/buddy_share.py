@@ -169,7 +169,7 @@ def _parse_title(content: str) -> str:
 
 
 def extract_recipe_from_history(
-    recent: list[dict], conn
+    recent: list[dict], conn, user_id: str | None = None
 ) -> tuple[str, str] | None:
     """Return (title, body) for the most recent recipe discussed."""
     for msg in reversed(recent):
@@ -182,9 +182,9 @@ def extract_recipe_from_history(
             continue
         return _parse_title(content), content
 
-    slugs = recipe_lookup.resolve_active_recipe_slugs("", recent, conn)
+    slugs = recipe_lookup.resolve_active_recipe_slugs("", recent, conn, user_id=user_id)
     if slugs:
-        blocks = recipe_lookup.build_authoritative_context(slugs[:1], conn)
+        blocks = recipe_lookup.build_authoritative_context(slugs[:1], conn, user_id=user_id)
         if blocks:
             block = blocks[0]
             return _parse_title(block), block

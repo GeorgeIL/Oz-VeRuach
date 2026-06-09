@@ -34,7 +34,7 @@ def _title_pattern(title: str) -> re.Pattern[str]:
     return re.compile(rf"\b{words}\b", re.IGNORECASE)
 
 
-def build_title_index(conn) -> list[tuple[str, str, str]]:
+def build_title_index(conn, user_id: str | None = None) -> list[tuple[str, str, str]]:
     """Return (title, slug, s3_key) sorted by title length descending."""
     manifest = s3_recipes._load_catalog_manifest()
     entries: dict[str, tuple[str, str, str]] = {}
@@ -45,8 +45,13 @@ def build_title_index(conn) -> list[tuple[str, str, str]]:
         if title:
             entries[slug] = (title, slug, s3_key)
 
+    sql = "SELECT slug, title, s3_key FROM recipes"
+    params: tuple = ()
+    if user_id:
+        sql += " WHERE author_id = %s"
+        params = (user_id,)
     with conn.cursor() as cur:
-        cur.execute("SELECT slug, title, s3_key FROM recipes")
+        cur.execute(sql, params)
         for row in cur.fetchall():
             slug = row["slug"]
             title = (row["title"] or "").strip()
@@ -57,12 +62,14 @@ def build_title_index(conn) -> list[tuple[str, str, str]]:
     return sorted(entries.values(), key=lambda item: len(item[0]), reverse=True)
 
 
-def detect_recipe_slugs(text: str, conn, max_results: int = 2) -> list[str]:
+def detect_recipe_slugs(
+    text: str, conn, max_results: int = 2, user_id: str | None = None
+) -> list[str]:
     """Find cookbook slugs whose titles appear in text (longest match wins)."""
     if not (text or "").strip():
         return []
 
-    index = build_title_index(conn)
+    index = build_title_index(conn, user_id=user_id)
     matches: list[tuple[int, str]] = []
 
     for title, slug, _s3_key in index:
@@ -114,7 +121,7 @@ def parse_numbered_recipe_list(text: str) -> dict[int, str]:
 
 
 def resolve_recipe_number_reference(
-    question: str, history: list[dict], conn, max_results: int = 1
+    question: str, history: list[dict], conn, max_results: int = 1, user_id: str | None = None
 ) -> list[str]:
     """Map 'recipe 1' / 'the first one' to a cookbook slug from the prior suggestion list."""
     match = _RECIPE_REF_RE.search(question or "")
@@ -133,18 +140,20 @@ def resolve_recipe_number_reference(
     if not title:
         return []
 
-    return detect_recipe_slugs(title, conn, max_results=max_results)
+    return detect_recipe_slugs(title, conn, max_results=max_results, user_id=user_id)
 
 
 def resolve_active_recipe_slugs(
-    question: str, history: list[dict], conn, max_results: int = 2
+    question: str, history: list[dict], conn, max_results: int = 2, user_id: str | None = None
 ) -> list[str]:
     """Resolve which recipe(s) the user is asking about (current or follow-up)."""
-    slugs = detect_recipe_slugs(question, conn, max_results=max_results)
+    slugs = detect_recipe_slugs(question, conn, max_results=max_results, user_id=user_id)
     if slugs:
         return slugs
 
-    slugs = resolve_recipe_number_reference(question, history, conn, max_results=max_results)
+    slugs = resolve_recipe_number_reference(
+        question, history, conn, max_results=max_results, user_id=user_id
+    )
     if slugs:
         return slugs
 
@@ -156,12 +165,22 @@ def resolve_active_recipe_slugs(
         for msg in reversed(history)
         if msg.get("role") in ("user", "assistant")
     )
-    return detect_recipe_slugs(combined, conn, max_results=max_results)
+    return detect_recipe_slugs(combined, conn, max_results=max_results, user_id=user_id)
 
 
-def load_recipe_context(slug: str, conn) -> str | None:
+def load_recipe_context(slug: str, conn, user_id: str | None = None) -> str | None:
     """Load full recipe markdown as an authoritative context block."""
-    index = build_title_index(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT author_id::text AS author_id, s3_key FROM recipes WHERE slug = %s",
+            (slug,),
+        )
+        owned = cur.fetchone()
+
+    if owned and user_id and str(owned["author_id"]) != user_id:
+        return None
+
+    index = build_title_index(conn, user_id=user_id)
     title = slug.replace("-", " ").title()
     s3_key = s3_recipes.catalog_s3_key(slug)
 
@@ -183,20 +202,24 @@ def load_recipe_context(slug: str, conn) -> str | None:
     )
 
 
-def build_authoritative_context(slugs: list[str], conn) -> list[str]:
+def build_authoritative_context(
+    slugs: list[str], conn, user_id: str | None = None
+) -> list[str]:
     blocks: list[str] = []
     for slug in slugs:
-        block = load_recipe_context(slug, conn)
+        block = load_recipe_context(slug, conn, user_id=user_id)
         if block:
             blocks.append(block)
     return blocks
 
 
-def build_retrieval_query(question: str, history: list[dict], conn) -> str:
+def build_retrieval_query(
+    question: str, history: list[dict], conn, user_id: str | None = None
+) -> str:
     """Expand KB retrieval query with recipe names and recent user context."""
     parts = [question.strip()]
-    slugs = resolve_active_recipe_slugs(question, history, conn)
-    index = build_title_index(conn)
+    slugs = resolve_active_recipe_slugs(question, history, conn, user_id=user_id)
+    index = build_title_index(conn, user_id=user_id)
     slug_to_title = {slug: title for title, slug, _key in index}
 
     for slug in slugs:

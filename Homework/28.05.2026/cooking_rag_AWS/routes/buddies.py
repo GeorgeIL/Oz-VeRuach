@@ -91,6 +91,7 @@ def list_buddies():
 @buddies_bp.route("/recipes", methods=["GET"])
 @login_required
 def list_share_recipes():
+    user = get_current_user()
     conn = get_db()
     query = (request.args.get("q") or "").strip()
     try:
@@ -99,15 +100,22 @@ def list_share_recipes():
     except ValueError:
         return jsonify({"error": "Invalid pagination parameters"}), 400
 
-    _, recipes, total = s3_recipes.search_recipes(conn, query, limit, offset)
+    _, recipes, total = s3_recipes.search_recipes(
+        conn, query, limit, offset, user_id=user["sub"]
+    )
     return jsonify({"recipes": recipes, "total": total})
 
 
 @buddies_bp.route("/recipes/<path:s3_key>", methods=["GET"])
 @login_required
 def get_share_recipe(s3_key: str):
+    user = get_current_user()
     if not s3_recipes.is_valid_recipe_key(s3_key):
         return jsonify({"error": "Invalid recipe key"}), 400
+    slug = s3_key.rsplit("/", 1)[-1][:-3] if s3_key.endswith(".md") else ""
+    conn = get_db()
+    if not s3_recipes.user_can_access_recipe(conn, user["sub"], slug, s3_key):
+        return jsonify({"error": "Recipe not found"}), 404
     try:
         preview = s3_recipes.get_recipe_preview(s3_key)
     except Exception as exc:
@@ -134,6 +142,10 @@ def send_to_buddies():
     if s3_key:
         if not s3_recipes.is_valid_recipe_key(s3_key):
             return jsonify({"error": "Invalid recipe selected"}), 400
+        conn = get_db()
+        slug = s3_key.rsplit("/", 1)[-1][:-3] if s3_key.endswith(".md") else ""
+        if not s3_recipes.user_can_access_recipe(conn, user["sub"], slug, s3_key):
+            return jsonify({"error": "Recipe not found"}), 404
         try:
             md_content = s3_recipes.get_recipe_content(s3_key)
             context = s3_recipes.build_email_context(md_content, personal_note)

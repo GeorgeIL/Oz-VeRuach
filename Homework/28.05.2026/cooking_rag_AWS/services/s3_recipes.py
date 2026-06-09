@@ -14,14 +14,14 @@ from config import Config
 
 _INDEX_TTL_SECONDS = 600
 _s3_client = None
-_index_cache: list[RecipeIndexEntry] | None = None
-_index_expires_at = 0.0
+_index_cache: dict[str, tuple[list["RecipeIndexEntry"], float]] = {}
 _manifest_cache: dict[str, dict] | None = None
 _manifest_expires_at = 0.0
 
 _TITLE_RE = re.compile(r"^#\s+(.+)", re.MULTILINE)
 _TAGS_RE = re.compile(r"^\*\*Tags:\*\*\s*(.+)", re.MULTILINE | re.IGNORECASE)
 _CATALOG_PREFIX = "catalog/"
+_USER_PREFIX = "users/"
 _MANIFEST_KEY_SUFFIX = "catalog/manifest.json"
 
 
@@ -50,10 +50,13 @@ def catalog_s3_key(slug: str) -> str:
     return f"{Config.S3_RECIPES_PREFIX}{_CATALOG_PREFIX}{slug}.md"
 
 
+def user_recipe_s3_key(user_id: str, slug: str) -> str:
+    return f"{Config.S3_RECIPES_PREFIX}{_USER_PREFIX}{user_id}/{slug}.md"
+
+
 def invalidate_index_cache() -> None:
-    global _index_cache, _index_expires_at, _manifest_cache, _manifest_expires_at
-    _index_cache = None
-    _index_expires_at = 0.0
+    global _index_cache, _manifest_cache, _manifest_expires_at
+    _index_cache = {}
     _manifest_cache = None
     _manifest_expires_at = 0.0
 
@@ -83,11 +86,41 @@ def parse_tags(md_text: str) -> list[str]:
 def _slug_from_key(key: str) -> str:
     prefix = Config.S3_RECIPES_PREFIX
     relative = key[len(prefix) :] if key.startswith(prefix) else key
+    if relative.startswith(_USER_PREFIX) and relative.endswith(".md"):
+        return relative.rsplit("/", 1)[-1][:-3]
     if relative.startswith(_CATALOG_PREFIX) and relative.endswith(".md"):
         return relative[len(_CATALOG_PREFIX) : -3]
     if relative.endswith(".md"):
         return relative[:-3]
     return relative
+
+
+def _foreign_owned_slugs(conn, user_id: str) -> set[str]:
+    """Slugs owned by other users (hide their private recipes from this user's index)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT slug FROM recipes WHERE author_id != %s",
+            (user_id,),
+        )
+        return {row["slug"] for row in cur.fetchall()}
+
+
+def user_can_access_recipe(conn, user_id: str, slug: str, s3_key: str = "") -> bool:
+    """True if user may read/share this recipe (catalog or own user recipe)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT author_id::text AS author_id, s3_key FROM recipes WHERE slug = %s",
+            (slug,),
+        )
+        row = cur.fetchone()
+    if row:
+        return str(row["author_id"]) == user_id
+    user_prefix = f"{Config.S3_RECIPES_PREFIX}{_USER_PREFIX}"
+    if s3_key.startswith(user_prefix):
+        return f"/{user_id}/" in s3_key or s3_key.startswith(
+            f"{user_prefix}{user_id}/"
+        )
+    return True
 
 
 def _title_from_slug(slug: str) -> str:
@@ -159,14 +192,18 @@ def _fetch_md_header(key: str) -> str:
         return ""
 
 
-def _load_rds_meta(conn) -> dict[str, dict]:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT slug, title, description, tags, author_username, created_at, s3_key
+def _load_rds_meta(conn, user_id: str | None = None) -> dict[str, dict]:
+    sql = """
+            SELECT slug, title, description, tags, author_username,
+                   author_id::text AS author_id, created_at, s3_key
             FROM recipes
             """
-        )
+    params: tuple = ()
+    if user_id:
+        sql += " WHERE author_id = %s"
+        params = (user_id,)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
         meta: dict[str, dict] = {}
         for row in cur.fetchall():
             r = dict(row)
@@ -178,23 +215,25 @@ def _load_rds_meta(conn) -> dict[str, dict]:
                 "description": r.get("description") or "",
                 "tags": tags or [],
                 "author_username": r.get("author_username"),
+                "author_id": r.get("author_id"),
                 "created_at": r.get("created_at"),
                 "s3_key": r.get("s3_key") or catalog_s3_key(r["slug"]),
             }
         return meta
 
 
-def build_recipe_index(conn) -> list[RecipeIndexEntry]:
-    global _index_cache, _index_expires_at
-
+def build_recipe_index(conn, user_id: str | None = None) -> list[RecipeIndexEntry]:
+    cache_key = user_id or "__public__"
     now = time.monotonic()
-    if _index_cache is not None and now < _index_expires_at:
-        return _index_cache
+    cached = _index_cache.get(cache_key)
+    if cached and now < cached[1]:
+        return cached[0]
 
     if not Config.S3_BUCKET:
         return []
 
-    rds_meta = _load_rds_meta(conn)
+    rds_meta = _load_rds_meta(conn, user_id)
+    foreign_slugs = _foreign_owned_slugs(conn, user_id) if user_id else set()
     manifest = _load_catalog_manifest()
     manifest_slugs = set(manifest.keys()) if manifest else set()
     from services import recipe_images
@@ -214,7 +253,12 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
                 continue
 
             slug = _slug_from_key(key)
+            if slug in foreign_slugs:
+                continue
             if manifest_slugs and slug not in manifest_slugs:
+                continue
+            # User saved a copy of this catalog recipe — show only their RDS entry.
+            if slug in rds_meta:
                 continue
 
             rds = rds_meta.get(slug, {})
@@ -237,7 +281,7 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
             image_state = recipe_images.resolve_image(
                 slug, manifest_item, image_rows.get(slug)
             )
-            source = "user" if slug in rds_meta else "catalog"
+            source = "catalog"
             indexed_keys.add(key)
             entries.append(
                 {
@@ -280,8 +324,7 @@ def build_recipe_index(conn) -> list[RecipeIndexEntry]:
         )
 
     entries.sort(key=lambda item: item["title"].lower())
-    _index_cache = entries
-    _index_expires_at = now + _INDEX_TTL_SECONDS
+    _index_cache[cache_key] = (entries, now + _INDEX_TTL_SECONDS)
     return entries
 
 
@@ -342,8 +385,9 @@ def search_recipes(
     query: str = "",
     limit: int = 50,
     offset: int = 0,
-    sort: str = "az",
+    sort: str = "latest",
     favorite_slugs: set[str] | None = None,
+    user_id: str | None = None,
 ) -> tuple[list[RecipeIndexEntry], list[RecipeIndexEntry], int]:
     """Search and sort recipes.
 
@@ -353,7 +397,7 @@ def search_recipes(
     When favorite_slugs is None, returns ([], paginated_all, total_all) for backward
     compatibility.
     """
-    index = build_recipe_index(conn)
+    index = build_recipe_index(conn, user_id=user_id)
     parsed = _parse_query(query)
 
     if parsed[0] == "tags" or (parsed[0] == "text" and parsed[1]):
@@ -377,12 +421,12 @@ def search_recipes(
 
 def is_valid_recipe_key(s3_key: str) -> bool:
     prefix = Config.S3_RECIPES_PREFIX
-    return (
-        bool(s3_key)
-        and s3_key.startswith(prefix)
-        and s3_key.endswith(".md")
-        and ".." not in s3_key
-    )
+    if not s3_key or ".." in s3_key or not s3_key.endswith(".md"):
+        return False
+    if not s3_key.startswith(prefix):
+        return False
+    relative = s3_key[len(prefix) :]
+    return relative.startswith(_CATALOG_PREFIX) or relative.startswith(_USER_PREFIX)
 
 
 def get_recipe_content(s3_key: str) -> str:

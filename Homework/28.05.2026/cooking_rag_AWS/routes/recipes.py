@@ -21,7 +21,7 @@ from auth_utils import get_current_user, login_required
 from config import Config
 from db import get_db
 from rag import engine as rag
-from services import recipe_images, s3_recipes
+from services import recipe_from_chat, recipe_images, s3_recipes
 
 recipes_bp = Blueprint("recipes", __name__, url_prefix="/recipes")
 PAGE_SIZE = 20
@@ -71,8 +71,8 @@ def _s3_key(slug: str) -> str:
     return s3_recipes.catalog_s3_key(slug)
 
 
-def _upload_to_s3(slug: str, md_content: str) -> str:
-    key = _s3_key(slug)
+def _upload_to_s3(slug: str, md_content: str, user_id: str) -> str:
+    key = s3_recipes.user_recipe_s3_key(user_id, slug)
     _s3().put_object(
         Bucket=Config.S3_BUCKET,
         Key=key,
@@ -102,8 +102,39 @@ def _unique_slug(conn, base_slug: str) -> str:
 
 def _row_to_recipe(row) -> dict:
     r = dict(row)
+    for field in ("ingredients", "steps", "tags"):
+        val = r.get(field)
+        if isinstance(val, str):
+            r[field] = json.loads(val)
+        elif val is None:
+            r[field] = []
     r["_id"] = r.get("id", "")  # template compat
     return r
+
+
+def _find_user_recipe_by_title(conn, user_id: str, title: str) -> str | None:
+    """Return slug if this user already saved a recipe with the same title."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT slug FROM recipes
+            WHERE author_id = %s AND LOWER(TRIM(title)) = LOWER(TRIM(%s))
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (user_id, title),
+        )
+        row = cur.fetchone()
+    return row["slug"] if row else None
+
+
+def _recipe_save_lock(conn, user_id: str, title: str) -> None:
+    """Serialize concurrent from-chat saves for the same user/title."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+            (user_id, title.lower().strip()),
+        )
 
 
 def _recipe_exists(conn, slug: str) -> bool:
@@ -155,9 +186,9 @@ def list_recipes():
     user = get_current_user()
     conn = get_db()
 
-    sort = request.args.get("sort", "az")
+    sort = request.args.get("sort", "latest")
     if sort not in ("latest", "oldest", "az", "za"):
-        sort = "az"
+        sort = "latest"
 
     query = (request.args.get("q") or "").strip()
     select_mode = request.args.get("select") == "1"
@@ -183,6 +214,7 @@ def list_recipes():
         offset,
         sort=sort,
         favorite_slugs=favorites,
+        user_id=user["sub"],
     )
     total_pages = max((total_others + PAGE_SIZE - 1) // PAGE_SIZE, 1)
     if page > total_pages:
@@ -195,6 +227,7 @@ def list_recipes():
             offset,
             sort=sort,
             favorite_slugs=favorites,
+            user_id=user["sub"],
         )
 
     favorite_recipes = [_row_to_recipe(item) for item in fav_items]
@@ -242,11 +275,15 @@ def create_recipe():
         return jsonify({"error": "At least one ingredient is required"}), 400
     if not steps:
         return jsonify({"error": "At least one step is required"}), 400
+    if not tags:
+        tags = recipe_from_chat.infer_recipe_tags(
+            title, description, ingredients, notes
+        )
 
     conn = get_db()
     slug = _unique_slug(conn, _slugify(title))
     md_content = _recipe_to_md(title, description, ingredients, steps, notes, tags)
-    s3_key = _upload_to_s3(slug, md_content)
+    s3_key = _upload_to_s3(slug, md_content, user["sub"])
 
     with conn.cursor() as cur:
         cur.execute(
@@ -298,6 +335,9 @@ def view_recipe(slug):
 
     if recipe:
         recipe = _row_to_recipe(recipe)
+        user = get_current_user()
+        if user["sub"] != recipe["author_id"]:
+            abort(404)
         image_state = s3_recipes.get_image_state(slug, conn)
         recipe["image_url"] = image_state["image_url"]
         recipe["image_status"] = image_state["status"]
@@ -310,7 +350,6 @@ def view_recipe(slug):
             recipe["tags"],
         )
         html_content = _render_md(md_content)
-        user = get_current_user()
         is_author = user and user["sub"] == recipe["author_id"]
         return render_template(
             "recipes/detail.html",
@@ -354,6 +393,7 @@ def view_recipe(slug):
 @recipes_bp.route("/<slug>/edit")
 @login_required
 def edit_recipe(slug):
+    user = get_current_user()
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute(
@@ -364,20 +404,29 @@ def edit_recipe(slug):
         recipe = cur.fetchone()
     if not recipe:
         abort(404)
+    recipe = _row_to_recipe(recipe)
+    if user["sub"] != recipe["author_id"]:
+        abort(403)
     return render_template(
-        "recipes/form.html", recipe=_row_to_recipe(recipe), action="edit"
+        "recipes/form.html", recipe=recipe, action="edit"
     )
 
 
 @recipes_bp.route("/<slug>", methods=["PUT"])
 @login_required
 def update_recipe(slug):
+    user = get_current_user()
     conn = get_db()
     with conn.cursor() as cur:
-        cur.execute("SELECT id, s3_key FROM recipes WHERE slug = %s", (slug,))
+        cur.execute(
+            "SELECT id, s3_key, author_id::text AS author_id FROM recipes WHERE slug = %s",
+            (slug,),
+        )
         recipe = cur.fetchone()
     if not recipe:
         return jsonify({"error": "Recipe not found"}), 404
+    if str(recipe["author_id"]) != user["sub"]:
+        return jsonify({"error": "Forbidden"}), 403
 
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
@@ -391,7 +440,7 @@ def update_recipe(slug):
         return jsonify({"error": "Title is required"}), 400
 
     md_content = _recipe_to_md(title, description, ingredients, steps, notes, tags)
-    s3_key = _upload_to_s3(slug, md_content)
+    s3_key = _upload_to_s3(slug, md_content, user["sub"])
 
     with conn.cursor() as cur:
         cur.execute(
@@ -423,12 +472,18 @@ def update_recipe(slug):
 @recipes_bp.route("/<slug>", methods=["DELETE"])
 @login_required
 def delete_recipe(slug):
+    user = get_current_user()
     conn = get_db()
     with conn.cursor() as cur:
-        cur.execute("SELECT s3_key FROM recipes WHERE slug = %s", (slug,))
+        cur.execute(
+            "SELECT s3_key, author_id::text AS author_id FROM recipes WHERE slug = %s",
+            (slug,),
+        )
         recipe = cur.fetchone()
     if not recipe:
         return jsonify({"error": "Recipe not found"}), 404
+    if str(recipe["author_id"]) != user["sub"]:
+        return jsonify({"error": "Forbidden"}), 403
 
     _delete_from_s3(recipe["s3_key"])
     recipe_images.cleanup_on_recipe_delete(conn, slug)
@@ -448,10 +503,13 @@ def delete_recipe(slug):
 @recipes_bp.route("/api/list")
 @login_required
 def api_list():
+    user = get_current_user()
     conn = get_db()
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id::text AS id, title, slug, tags, ingredients FROM recipes ORDER BY title"
+            """SELECT id::text AS id, title, slug, tags, ingredients
+               FROM recipes WHERE author_id = %s ORDER BY title""",
+            (user["sub"],),
         )
         rows = [dict(r) for r in cur.fetchall()]
     return jsonify(rows)
@@ -477,32 +535,52 @@ def recipe_from_chat():
         return jsonify({"error": "Recipe title is missing"}), 400
     if not ingredients or not steps:
         return jsonify({"error": "Recipe must have ingredients and steps"}), 400
+    if not tags:
+        tags = recipe_from_chat.infer_recipe_tags(
+            title, description, ingredients, notes
+        )
 
     conn = get_db()
-    slug = _unique_slug(conn, _slugify(title))
-    md_content = _recipe_to_md(title, description, ingredients, steps, notes, tags)
-    s3_key = _upload_to_s3(slug, md_content)
+    try:
+        _recipe_save_lock(conn, user["sub"], title)
+        existing_slug = _find_user_recipe_by_title(conn, user["sub"], title)
+        if existing_slug:
+            conn.commit()
+            return jsonify(
+                {
+                    "message": "Recipe already in your cookbook",
+                    "redirect": url_for("recipes.view_recipe", slug=existing_slug),
+                }
+            )
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO recipes
-               (slug, title, description, ingredients, steps, notes, tags,
-                author_id, author_username, s3_key)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (
-                slug,
-                title,
-                description,
-                json.dumps(ingredients),
-                json.dumps(steps),
-                notes,
-                json.dumps(tags),
-                user["sub"],
-                "Chef AI",
-                s3_key,
-            ),
-        )
-    conn.commit()
+        slug = _unique_slug(conn, _slugify(title))
+        md_content = _recipe_to_md(title, description, ingredients, steps, notes, tags)
+        s3_key = _upload_to_s3(slug, md_content, user["sub"])
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO recipes
+                   (slug, title, description, ingredients, steps, notes, tags,
+                    author_id, author_username, s3_key)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    slug,
+                    title,
+                    description,
+                    json.dumps(ingredients),
+                    json.dumps(steps),
+                    notes,
+                    json.dumps(tags),
+                    user["sub"],
+                    "Chef AI",
+                    s3_key,
+                ),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
     s3_recipes.invalidate_index_cache()
     rag.sync_knowledge_base()
     recipe_images.trigger_generation_after_create(conn, slug, title)
@@ -737,6 +815,10 @@ def upload_recipe():
     steps = [s.strip() for s in (parsed.get("steps") or []) if str(s).strip()]
     notes = (parsed.get("notes") or "").strip()
     tags = [t.strip().lower() for t in (parsed.get("tags") or []) if str(t).strip()]
+    if not tags:
+        tags = recipe_from_chat.infer_recipe_tags(
+            title, description, ingredients, notes
+        )
 
     if not ingredients or not steps:
         return render_template(
@@ -747,7 +829,7 @@ def upload_recipe():
     conn = get_db()
     slug = _unique_slug(conn, _slugify(title))
     md_content = _recipe_to_md(title, description, ingredients, steps, notes, tags)
-    s3_key = _upload_to_s3(slug, md_content)
+    s3_key = _upload_to_s3(slug, md_content, user["sub"])
 
     with conn.cursor() as cur:
         cur.execute(

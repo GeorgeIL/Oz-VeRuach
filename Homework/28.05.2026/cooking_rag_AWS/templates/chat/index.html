@@ -53,11 +53,6 @@
             ✓ {{ index_status.total_documents }} recipes indexed
             ({{ index_status.catalog_count }} catalog + {{ index_status.user_count }} yours)
           </div>
-          {% if index_status.last_sync_status %}
-          <p class="index-sync-status sidebar-hint">
-            Last sync: {{ index_status.last_sync_status }}
-          </p>
-          {% endif %}
           {% else %}
           <div class="status-badge status-error">
             ⚠ {{ index_error or 'Index not ready' }}

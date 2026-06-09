@@ -130,6 +130,51 @@ const SAVED_RECIPES_STORAGE_KEY = "chefAiSavedRecipes";
 const RECIPE_FENCE_RE =
   /```(?:recipe-json|json)\s*\n?([\s\S]*?)```|<recipe-json>\s*([\s\S]*?)<\/recipe-json>/gi;
 
+function dedupeRecipeBlocks(blocks) {
+  const seen = new Set();
+  const unique = [];
+  for (const block of blocks) {
+    const fp = recipeFingerprint(block);
+    if (seen.has(fp)) continue;
+    seen.add(fp);
+    unique.push(block);
+  }
+  return unique;
+}
+
+function inferRecipeTags(title, description = "", ingredients = [], notes = "") {
+  const text = [title, description, notes, ...(ingredients || [])]
+    .join(" ")
+    .toLowerCase();
+  const tags = [];
+  const keywords = {
+    breakfast: ["breakfast", "brunch"],
+    lunch: ["lunch"],
+    dinner: ["dinner", "supper"],
+    dessert: ["dessert", "cake", "cookie", "pie", "pudding"],
+    vegetarian: ["vegetarian", "veggie"],
+    vegan: ["vegan"],
+    chicken: ["chicken", "poultry"],
+    beef: ["beef", "steak"],
+    fish: ["fish", "salmon", "seafood", "shrimp"],
+    pasta: ["pasta", "noodle", "spaghetti"],
+    soup: ["soup", "stew", "broth"],
+    salad: ["salad"],
+    baking: ["bake", "bread", "muffin"],
+    quick: ["quick", "easy", "fast"],
+  };
+  for (const [tag, terms] of Object.entries(keywords)) {
+    if (terms.some((term) => text.includes(term))) tags.push(tag);
+  }
+  const stop = new Set(["with", "and", "the", "for", "your", "recipe", "fresh"]);
+  for (const word of String(title || "").toLowerCase().match(/\b[a-z]{4,}\b/g) || []) {
+    if (stop.has(word) || tags.includes(word)) continue;
+    tags.push(word);
+    if (tags.length >= 6) break;
+  }
+  return tags.slice(0, 6);
+}
+
 function normalizeRecipeData(raw) {
   if (!raw || typeof raw !== "object") return null;
   let tags = raw.tags || [];
@@ -150,15 +195,23 @@ function normalizeRecipeData(raw) {
       steps.push(s.replace(/^\s*\d+[.)]\s*/, ""));
     }
   });
+  const title = String(raw.title || raw.name || "").trim();
+  const description = String(raw.description || "").trim();
+  const ingredients = (Array.isArray(raw.ingredients) ? raw.ingredients : [])
+    .map((i) => String(i).trim())
+    .filter(Boolean);
+  const notes = String(raw.notes || "").trim();
+  tags = tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean);
+  if (!tags.length) {
+    tags = inferRecipeTags(title, description, ingredients, notes);
+  }
   return {
-    title: String(raw.title || raw.name || "").trim(),
-    description: String(raw.description || "").trim(),
-    ingredients: (Array.isArray(raw.ingredients) ? raw.ingredients : [])
-      .map((i) => String(i).trim())
-      .filter(Boolean),
+    title,
+    description,
+    ingredients,
     steps,
-    notes: String(raw.notes || "").trim(),
-    tags: tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean),
+    notes,
+    tags,
   };
 }
 
@@ -429,7 +482,17 @@ function parseMarkdownRecipe(text) {
     notes: sections.notes || "",
     tags,
   };
-  return isValidRecipeData(data) ? data : null;
+  const normalized = isValidRecipeData(data) ? data : null;
+  if (!normalized) return null;
+  if (!normalized.tags.length) {
+    normalized.tags = inferRecipeTags(
+      normalized.title,
+      normalized.description,
+      normalized.ingredients,
+      normalized.notes,
+    );
+  }
+  return normalized;
 }
 
 function looksLikeFullRecipeAnswer(text) {
@@ -443,18 +506,22 @@ function mountAssistantContent(messageDiv, rawContent, serverRecipe = null) {
 
   const { display, blocks } = extractRecipeJsonBlocks(rawContent);
   if (serverRecipe && isValidRecipeData(serverRecipe)) {
-    blocks.push(serverRecipe);
+    // Trust server-resolved recipe only — avoid duplicate blocks from raw answer text.
+    blocks.length = 0;
+    blocks.push(normalizeRecipeData(serverRecipe));
   } else if (!blocks.length && looksLikeFullRecipeAnswer(rawContent)) {
     const parsed = parseMarkdownRecipe(rawContent);
     if (parsed) blocks.push(parsed);
   }
+
+  const uniqueBlocks = dedupeRecipeBlocks(blocks);
 
   const normalized = normalizeAssistantMarkdown(display || "");
   contentEl.innerHTML =
     typeof marked !== "undefined"
       ? marked.parse(normalized)
       : escapeHtml(normalized || "");
-  attachRecipeButtons(messageDiv, blocks);
+  attachRecipeButtons(messageDiv, uniqueBlocks);
 }
 
 /**
@@ -466,21 +533,22 @@ function attachRecipeButtons(div, recipeBlocks = []) {
   const bubble = div.querySelector(".message-bubble");
   if (!bubble) return;
 
-  const blocks =
-    recipeBlocks.length > 0 ? recipeBlocks : extractRecipeBlocksFromDom(div);
+  const blocks = dedupeRecipeBlocks(
+    recipeBlocks.length > 0 ? recipeBlocks : extractRecipeBlocksFromDom(div),
+  );
 
-  blocks.forEach((data) => {
-    if (!isValidRecipeData(data)) return;
+  for (const data of blocks) {
+    if (!isValidRecipeData(data)) continue;
 
     if (isRecipeSaved(data)) {
-      if (!bubble.nextElementSibling?.classList.contains("recipe-saved-label")) {
+      if (!div.querySelector(".recipe-saved-label")) {
         bubble.after(createSavedRecipeLabel());
       }
-      return;
+      break;
     }
 
-    if (bubble.nextElementSibling?.classList.contains("btn-add-recipe")) {
-      return;
+    if (div.querySelector(".btn-add-recipe, .recipe-saved-label")) {
+      break;
     }
 
     div.querySelectorAll("pre code.language-recipe-json, pre code.language-json").forEach((code) => {
@@ -493,7 +561,8 @@ function attachRecipeButtons(div, recipeBlocks = []) {
     btn.innerHTML = "📥 Add to My Cookbook";
     btn.onclick = () => saveAiRecipe(data, btn);
     bubble.after(btn);
-  });
+    break;
+  }
 
   div.dataset.recipeButtonsDone = "true";
 }
@@ -502,26 +571,31 @@ function attachRecipeButtons(div, recipeBlocks = []) {
  * POST the extracted recipe JSON to the backend and redirect to the new recipe page.
  */
 async function saveAiRecipe(data, btn) {
+  if (btn.dataset.saving === "true") return;
+  btn.dataset.saving = "true";
   btn.disabled = true;
   btn.textContent = "⏳ Saving...";
+  const payload = normalizeRecipeData(data);
   try {
     const resp = await fetch("/recipes/from-chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
+      body: JSON.stringify(payload),
     });
     const result = await resp.json();
     if (resp.ok) {
-      markRecipeSaved(data);
+      markRecipeSaved(payload);
       const label = createSavedRecipeLabel();
       btn.replaceWith(label);
       setTimeout(() => window.open(result.redirect, "_blank"), 700);
     } else {
+      btn.dataset.saving = "false";
       btn.disabled = false;
       btn.textContent = "📥 Add to My Cookbook";
       showAlert(result.error || "Failed to save recipe", "error");
     }
   } catch {
+    btn.dataset.saving = "false";
     btn.disabled = false;
     btn.textContent = "📥 Add to My Cookbook";
     showAlert("Network error - could not save recipe", "error");
