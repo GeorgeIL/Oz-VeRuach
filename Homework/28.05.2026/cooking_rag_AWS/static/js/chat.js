@@ -64,7 +64,7 @@ async function sendMessage() {
     removeThinking(thinkingId);
 
     if (resp.ok) {
-      appendMessage("assistant", data.answer);
+      appendMessage("assistant", data.answer, data.recipe || null);
     } else {
       showAlert(data.error || "Something went wrong", "error");
       appendMessage("assistant", `⚠️ ${data.error || "An error occurred."}`);
@@ -80,7 +80,7 @@ async function sendMessage() {
 
 /* ── DOM helpers ─────────────────────────────────────────────────────────────── */
 
-function appendMessage(role, content) {
+function appendMessage(role, content, recipeData = null) {
   const container = messagesEl();
   const div = document.createElement("div");
   div.className = `message message--${role}`;
@@ -93,7 +93,7 @@ function appendMessage(role, content) {
       <span class="message-role">👨‍🍳 Chef AI</span>
     `;
     container.appendChild(div);
-    mountAssistantContent(div, content);
+    mountAssistantContent(div, content, recipeData);
   } else {
     div.innerHTML = `
       <div class="message-bubble">
@@ -127,7 +127,40 @@ function removeThinking(id) {
 /* ── AI recipe save ─────────────────────────────────────────────────────────── */
 
 const SAVED_RECIPES_STORAGE_KEY = "chefAiSavedRecipes";
-const RECIPE_FENCE_RE = /```(?:recipe-json|json)\s*\n?([\s\S]*?)```/gi;
+const RECIPE_FENCE_RE =
+  /```(?:recipe-json|json)\s*\n?([\s\S]*?)```|<recipe-json>\s*([\s\S]*?)<\/recipe-json>/gi;
+
+function normalizeRecipeData(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  let tags = raw.tags || [];
+  if (typeof tags === "string") {
+    tags = tags.split(",").map((t) => t.trim()).filter(Boolean);
+  }
+  const steps = [];
+  const rawSteps = Array.isArray(raw.steps) ? raw.steps : raw.steps ? [raw.steps] : [];
+  rawSteps.forEach((item) => {
+    const s = String(item).trim();
+    if (!s) return;
+    if ((s.match(/\b\d+[.)]\s/g) || []).length >= 2) {
+      s.split(/(?:(?<=[.!?])\s+|\s+)(?=\d+[.)]\s)/).forEach((part) => {
+        const cleaned = part.replace(/^\s*\d+[.)]\s*/, "").trim();
+        if (cleaned) steps.push(cleaned);
+      });
+    } else {
+      steps.push(s.replace(/^\s*\d+[.)]\s*/, ""));
+    }
+  });
+  return {
+    title: String(raw.title || raw.name || "").trim(),
+    description: String(raw.description || "").trim(),
+    ingredients: (Array.isArray(raw.ingredients) ? raw.ingredients : [])
+      .map((i) => String(i).trim())
+      .filter(Boolean),
+    steps,
+    notes: String(raw.notes || "").trim(),
+    tags: tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean),
+  };
+}
 
 function getSavedRecipeKeys() {
   try {
@@ -194,7 +227,7 @@ function extractRecipeJsonBlocks(content) {
   let match;
   while ((match = RECIPE_FENCE_RE.exec(content)) !== null) {
     try {
-      const data = JSON.parse(match[1].trim());
+      const data = normalizeRecipeData(JSON.parse((match[1] || match[2] || "").trim()));
       if (isValidRecipeData(data)) {
         blocks.push(data);
       }
@@ -303,11 +336,119 @@ function normalizeAssistantMarkdown(text) {
   return s.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function mountAssistantContent(messageDiv, rawContent) {
+function parseMarkdownRecipe(text) {
+  if (!text) return null;
+
+  const cleaned = String(text)
+    .replace(/^\[Authoritative cookbook entry[^\]]*\]\s*\n?/i, "")
+    .trim();
+  if (!cleaned) return null;
+
+  let title = "";
+  const hashTitle = cleaned.match(/^#\s+(.+)$/m);
+  if (hashTitle) {
+    const candidate = hashTitle[1].trim();
+    if (!/^\d+$/.test(candidate) && !candidate.includes("**Tags:**")) {
+      title = candidate;
+    }
+  }
+  if (!title) {
+    for (const match of cleaned.matchAll(/^##\s+(.+?)\s*$/gm)) {
+      const candidate = match[1].trim();
+      if (!/^(ingredients|steps|instructions|directions|description|notes)$/i.test(candidate)) {
+        title = candidate;
+        break;
+      }
+    }
+  }
+  if (!title) {
+    const intro = cleaned.split("\n", 1)[0];
+    const introPatterns = [
+      /recipe\s+for\s+(?:(?:a|an|the)\s+)?([^\n:.,!?]{2,60})/i,
+      /here(?:'s| is)\s+(?:a\s+)?(?:new\s+)?([^\n:.,!?]{2,60}?)\s+recipe/i,
+    ];
+    for (const re of introPatterns) {
+      const m = intro.match(re);
+      if (m) {
+        let cand = m[1].replace(/^(a|an|the|new)\s+/i, "").trim().replace(/[.:\-\s]+$/, "");
+        if (cand && !/^(ingredients|steps|description|notes)$/i.test(cand)) {
+          title = cand.replace(/\b\w/g, (c) => c.toUpperCase());
+          break;
+        }
+      }
+    }
+  }
+  if (!title) return null;
+
+  const sectionRe =
+    /^\s*(?:#{1,3}\s+)?\*{0,2}\s*(Ingredients|Steps|Instructions|Directions|Description|Notes)\s*:?\s*\*{0,2}\s*:?\s*$/gim;
+  const sectionAliases = { instructions: "steps", directions: "steps" };
+  const sections = {};
+  const matches = [...cleaned.matchAll(sectionRe)];
+  matches.forEach((match, idx) => {
+    let name = match[1].toLowerCase();
+    name = sectionAliases[name] || name;
+    const start = match.index + match[0].length;
+    const end = idx + 1 < matches.length ? matches[idx + 1].index : cleaned.length;
+    sections[name] = cleaned.slice(start, end).trim();
+  });
+
+  const ingredients = [];
+  const ingSection = sections.ingredients || "";
+  for (const line of ingSection.match(/^\s*[-*]\s+(.+)$/gm) || []) {
+    ingredients.push(line.replace(/^\s*[-*]\s+/, "").trim());
+  }
+  if (!ingredients.length && ingSection.includes(" - ")) {
+    ingredients.push(
+      ...ingSection
+        .split(/\s+-\s+/)
+        .map((part) => part.trim())
+        .filter(Boolean),
+    );
+  }
+
+  const steps = [];
+  const stepSection = sections.steps || "";
+  for (const line of stepSection.match(/^\s*\d+\.\s+(.+)$/gm) || []) {
+    steps.push(line.replace(/^\s*\d+\.\s+/, "").trim());
+  }
+
+  const tagsMatch = cleaned.match(/^\*\*Tags:\*\*\s*(.+)$/im);
+  const tags = tagsMatch
+    ? tagsMatch[1]
+        .split(",")
+        .map((tag) => tag.trim().toLowerCase())
+        .filter(Boolean)
+    : [];
+
+  const data = {
+    title,
+    description: sections.description || "",
+    ingredients,
+    steps,
+    notes: sections.notes || "",
+    tags,
+  };
+  return isValidRecipeData(data) ? data : null;
+}
+
+function looksLikeFullRecipeAnswer(text) {
+  const lower = String(text || "").toLowerCase();
+  return lower.includes("ingredient") && (lower.includes("step") || /^\s*\d+\.\s+/m.test(text));
+}
+
+function mountAssistantContent(messageDiv, rawContent, serverRecipe = null) {
   const contentEl = messageDiv.querySelector(".message-content");
   if (!contentEl) return;
 
   const { display, blocks } = extractRecipeJsonBlocks(rawContent);
+  if (serverRecipe && isValidRecipeData(serverRecipe)) {
+    blocks.push(serverRecipe);
+  } else if (!blocks.length && looksLikeFullRecipeAnswer(rawContent)) {
+    const parsed = parseMarkdownRecipe(rawContent);
+    if (parsed) blocks.push(parsed);
+  }
+
   const normalized = normalizeAssistantMarkdown(display || "");
   contentEl.innerHTML =
     typeof marked !== "undefined"

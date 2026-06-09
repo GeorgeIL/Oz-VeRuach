@@ -7,7 +7,7 @@ from auth_utils import get_current_user, login_required
 from config import Config
 from db import get_db
 from rag import engine as rag
-from services import bedrock_agent, buddy_share, recipe_lookup
+from services import bedrock_agent, buddy_share, recipe_from_chat, recipe_lookup
 
 # Max chars of last recipe body passed to the agent for ShareRecipeWithBuddy
 _LAST_RECIPE_PROMPT_MAX_CHARS = 6000
@@ -295,6 +295,10 @@ def ask():
         traceback.print_exc()
         return _chef_error_response(exc)
 
+    display_answer, saveable_recipe = recipe_from_chat.process_answer(
+        answer, active_slugs, conn
+    )
+
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO messages (conversation_id, role, content, created_at)"
@@ -304,11 +308,15 @@ def ask():
         cur.execute(
             "INSERT INTO messages (conversation_id, role, content, created_at)"
             " VALUES (%s, %s, %s, clock_timestamp())",
-            (conv_id, "assistant", answer),
+            (conv_id, "assistant", display_answer),
         )
     conn.commit()
 
-    return jsonify({"answer": answer, "sources": 0})
+    payload = {"answer": display_answer, "sources": 0}
+    if saveable_recipe:
+        payload["recipe"] = saveable_recipe
+
+    return jsonify(payload)
 
 
 @chat_bp.route("/agent/share-recipe", methods=["POST"])
