@@ -1,7 +1,7 @@
 # n8n Customer Support Workflow Summary
 
 This n8n workflow establishes a secure, automated AI customer support agent with an integrated safety guardrail layer, conversational memory, and automated escalation tools.
-
+```
 [Chat Message Received] 
          │
          ▼
@@ -12,7 +12,7 @@ This n8n workflow establishes a secure, automated AI customer support agent with
          └─── (Pass) ──► [AI Agent 1] (Gemini Model 2 + Memory)
                               │
                               └──► (If Billing Query) ──► [send_email_to_team Tool]
-
+```
 ## 1. Trigger & Safety Guardrail
 
     Trigger: The workflow initiates when a new chat message is received from a user.
