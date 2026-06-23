@@ -1,0 +1,718 @@
+{
+  "name": "Financial Report Analyst",
+  "nodes": [
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "prompt",
+              "name": "prompt",
+              "value": "=You are a financial document analysis assistant.\n\nAnalyze the following quarterly financial report and return ONLY valid JSON.\n\nDo not give investment advice.\nDo not recommend buying, selling, or holding any stock.\nOnly summarize and analyze the financial information inside the document.\n\nReturn this exact JSON structure:\n\n{\n  \"document_type\": \"one of: earnings_summary, budget_proposal, expense_report, other\",\n  \"company\": \"company name\",\n  \"ticker\": \"stock ticker if mentioned, otherwise null\",\n  \"fiscal_quarter\": \"Q1/Q2/Q3/Q4 if mentioned\",\n  \"fiscal_year\": \"year if mentioned\",\n  \"report_date\": \"date if mentioned\",\n  \"currency\": \"currency used in the report\",\n  \"summary\": \"2-3 sentence summary of the report\",\n  \"financial_metrics\": {\n    \"revenue\": \"revenue amount and change if mentioned\",\n    \"net_income\": \"net income amount and change if mentioned\",\n    \"eps\": \"earnings per share if mentioned\",\n    \"expenses\": \"major expense numbers if mentioned\",\n    \"cash_flow\": \"cash flow information if mentioned\",\n    \"guidance\": \"future guidance if mentioned\"\n  },\n  \"key_findings\": [\"finding 1\", \"finding 2\", \"finding 3\"],\n  \"risks\": [\"risk 1\"],\n  \"sentiment\": \"positive, neutral, or negative\",\n  \"risk_level\": \"low, medium, or high\",\n  \"entities\": {\n    \"organizations\": [],\n    \"people\": [],\n    \"dates\": [],\n    \"amounts\": []\n  },\n  \"action_items\": [\"action 1\"],\n  \"confidence_score\": 0.0\n}\n\nDocument text:\n{{ $json.extracted_text }}",
+              "type": "string"
+            },
+            {
+              "id": "filename",
+              "name": "filename",
+              "value": "={{ $json.filename }}",
+              "type": "string"
+            },
+            {
+              "id": "notification_email",
+              "name": "notification_email",
+              "value": "={{ $json.notification_email }}",
+              "type": "string"
+            },
+            {
+              "id": "file_type",
+              "name": "file_type",
+              "value": "={{ $json.file_type }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        5776,
+        1056
+      ],
+      "id": "88d187d4-8fad-49f7-b68b-c69fdd8ed894",
+      "name": "Build Gemini Prompt"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": {{ JSON.stringify($json.prompt) }}\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.2,\n    \"responseMimeType\": \"application/json\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        6000,
+        1056
+      ],
+      "id": "f186eeab-7da9-4c08-9284-542d7bd26ad7",
+      "name": "Gemini HTTP Analyze",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ymWh4EFauLre5vjn",
+          "name": "Header Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst text = response.candidates?.[0]?.content?.parts?.[0]?.text;\nif (!text) {\n  throw new Error('Gemini HTTP returned no text content');\n}\nconst cleaned = text.replace(/^```json\\s*/i, '').replace(/\\s*```$/, '').trim();\nconst parsed = JSON.parse(cleaned);\nreturn [{ json: parsed }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6224,
+        1056
+      ],
+      "id": "77c0d1aa-1de0-4ed1-9297-4e42ea65c2d8",
+      "name": "Parse Gemini JSON"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "filename",
+              "name": "filename",
+              "value": "={{ $('Build Gemini Prompt').item.json.filename }}",
+              "type": "string"
+            },
+            {
+              "id": "file_type",
+              "name": "file_type",
+              "value": "={{ $('Build Gemini Prompt').item.json.file_type }}",
+              "type": "string"
+            },
+            {
+              "id": "notification_email",
+              "name": "notification_email",
+              "value": "={{ $('Build Gemini Prompt').item.json.notification_email }}",
+              "type": "string"
+            },
+            {
+              "id": "analysis_json",
+              "name": "analysis_json",
+              "value": "={{ JSON.stringify($json) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        6448,
+        1056
+      ],
+      "id": "e5238c87-c6c8-44ac-aa16-ebf7743d8555",
+      "name": "Prepare Agent Context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const text = ($json.extracted_text || '').trim();\nif (text.length < 50) {\n  throw new Error('Extracted text is empty or too short. The PDF may be scanned/image-only.');\n}\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5328,
+        1056
+      ],
+      "id": "5f98a260-6e27-4e0b-b858-c2cea4261d5d",
+      "name": "Validate Extracted Text"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "1UnAz_QOhHRllXguFOAXAyjGf7gGUcgdG",
+          "mode": "list",
+          "cachedResultName": "OZ_Flow_Cloud_Document_Analyst",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1UnAz_QOhHRllXguFOAXAyjGf7gGUcgdG"
+        },
+        "event": "fileCreated",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        4432,
+        1056
+      ],
+      "id": "a7dd7109-1d2d-4530-a709-f147e25f4435",
+      "name": "Google Drive Trigger1",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "3voXmh99weSXmHNj",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        4656,
+        1056
+      ],
+      "id": "deaf12b1-bea2-48fb-ab02-63d2cd2e5088",
+      "name": "Download File1",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "3voXmh99weSXmHNj",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const name = ($('Google Drive Trigger1').first().json.name || '').toLowerCase();\nconst allowed = ['.pdf', '.docx', '.txt'];\n\nif (!allowed.some((ext) => name.endsWith(ext))) {\n  throw new Error(`Unsupported file type for \"${name}\". Supported: PDF, DOCX, TXT.`);\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4880,
+        1056
+      ],
+      "id": "bb5d646a-bfe1-4253-9fc3-71b2cc4747f7",
+      "name": "Validate File Type1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/extract",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5104,
+        1056
+      ],
+      "id": "b13f4f0b-5e84-4f42-9da8-a3a59180639c",
+      "name": "Extract Text1"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "filename",
+              "name": "filename",
+              "value": "={{ $json.filename || $('Google Drive Trigger1').item.json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "extracted_text",
+              "name": "extracted_text",
+              "value": "={{ $json.extracted_text }}",
+              "type": "string"
+            },
+            {
+              "id": "notification_email",
+              "name": "notification_email",
+              "value": "glovatskyg@gmail.com",
+              "type": "string"
+            },
+            {
+              "id": "file_type",
+              "name": "file_type",
+              "value": "={{ ($json.filename || $('Google Drive Trigger1').item.json.name || '').split('.').pop().toLowerCase() }}",
+              "type": "string"
+            },
+            {
+              "id": "file_type",
+              "name": "file_type",
+              "value": "={{ ($json.filename || $('Google Drive Trigger1').item.json.name || '').split('.').pop().toLowerCase() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        5552,
+        1056
+      ],
+      "id": "ff95db05-2824-4408-b251-ca666a3dd68d",
+      "name": "Prepare Document Input1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Filename: {{ $json.filename }}\nFile type: {{ $json.file_type }}\nNotification email: {{ $json.notification_email }}\n\nPre-computed analysis (use this for all tool calls):\n{{ $json.analysis_json }}\n\nComplete all required tool calls in order:\n1. enrich_metadata\n2. append_row\n3. send_notification\n\nThen return the final JSON summary only (same schema as analysis_json).",
+        "options": {
+          "systemMessage": "You are a Financial Report Analyst agent.\n\nThe project topic is:\nFinancial reports — earnings summaries, budget proposals, expense reports.\n\nYou receive a pre-computed analysis_json from an upstream Gemini HTTP analysis step.\nDo NOT re-analyze the document from scratch. Use analysis_json for all field values.\n\nDo NOT give investment advice.\nDo NOT recommend buying, selling, or holding any stock.\n\nRequired workflow — call tools in this exact order:\n\n1. enrich_metadata\n   Pass document_type, company, ticker, fiscal_quarter, fiscal_year, sentiment, risk_level, confidence_score, financial_metrics as JSON string, entities as JSON string — all from analysis_json.\n\n2. append_row\n   Log the full analysis to Google Sheets using document_id, department, routing_tag, sensitivity, processed_at from enrich_metadata.\n   Pass filename and file_type from the input context.\n   Map revenue, net_income, eps, expenses, guidance from analysis_json.financial_metrics.\n   key_findings and action_items: semicolon-separated strings.\n\n3. send_notification\n   Email the summary to the notification_email from the input.\n   Generate a professional HTML email that MUST include:\n   filename, company, ticker, fiscal quarter, fiscal year, document_type, sentiment, risk_level, department, sensitivity, routing_tag, summary, key_findings, action_items.\n\nField rules:\n- document_type: earnings_summary, budget_proposal, expense_report, or other\n- sentiment: positive, neutral, or negative\n- risk_level: low, medium, or high\n- confidence_score: 0.0 to 1.0\n\nAfter all tools succeed, your FINAL message must be ONLY valid JSON matching analysis_json structure with nested financial_metrics, entities, risks, key_findings, and action_items."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        6800,
+        1056
+      ],
+      "id": "2b5fd5d8-d61e-4ffb-91e3-103cfa565125",
+      "name": "Financial Report Agent1"
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-pro-latest",
+        "options": {
+          "temperature": 0.2
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        6672,
+        1280
+      ],
+      "id": "aae84970-5715-448b-82a1-252592455cbe",
+      "name": "Google Gemini Chat Model1",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "LDePfCwLsioYTVIi",
+          "name": "Google Gemini(PaLM) Api account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/enrich",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ document_type: $fromAI('document_type', 'Document type: earnings_summary, budget_proposal, expense_report, or other', 'string'), company: $fromAI('company', 'Company name', 'string'), ticker: $fromAI('ticker', 'Stock ticker or null', 'string'), fiscal_quarter: $fromAI('fiscal_quarter', 'Fiscal quarter Q1-Q4', 'string'), fiscal_year: $fromAI('fiscal_year', 'Fiscal year', 'string'), sentiment: $fromAI('sentiment', 'positive, neutral, or negative', 'string'), risk_level: $fromAI('risk_level', 'low, medium, or high', 'string'), confidence_score: Number($fromAI('confidence_score', 'Confidence score 0.0 to 1.0', 'string')), financial_metrics: JSON.parse($fromAI('financial_metrics', 'JSON string of financial metrics object', 'string')), entities: JSON.parse($fromAI('entities', 'JSON string of entities object', 'string')) }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        6800,
+        1280
+      ],
+      "id": "bc8f8e6c-c3d9-4281-9be3-c0c5c040afdf",
+      "name": "enrich_metadata1"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1VGNWRQVbdayp1sAYN1JMt2PLUpnSaA88RgJMPqsdtM4",
+          "mode": "list",
+          "cachedResultName": "Financial Reports Analysis"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "document_id": "={{ $fromAI('document_id', 'UUID from enrich_metadata', 'string') }}",
+            "filename": "={{ $fromAI('filename', 'Original filename', 'string') }}",
+            "company": "={{ $fromAI('company', 'Company name', 'string') }}",
+            "ticker": "={{ $fromAI('ticker', 'Stock ticker', 'string') }}",
+            "fiscal_quarter": "={{ $fromAI('fiscal_quarter', 'Q1/Q2/Q3/Q4', 'string') }}",
+            "fiscal_year": "={{ $fromAI('fiscal_year', 'Fiscal year', 'string') }}",
+            "report_date": "={{ $fromAI('report_date', 'Report date if known', 'string') }}",
+            "document_type": "={{ $fromAI('document_type', 'Document type', 'string') }}",
+            "revenue": "={{ $fromAI('revenue', 'Revenue metric', 'string') }}",
+            "net_income": "={{ $fromAI('net_income', 'Net income metric', 'string') }}",
+            "eps": "={{ $fromAI('eps', 'EPS metric', 'string') }}",
+            "expenses": "={{ $fromAI('expenses', 'Expenses metric', 'string') }}",
+            "guidance": "={{ $fromAI('guidance', 'Future guidance', 'string') }}",
+            "sentiment": "={{ $fromAI('sentiment', 'Sentiment', 'string') }}",
+            "risk_level": "={{ $fromAI('risk_level', 'Risk level', 'string') }}",
+            "department": "={{ $fromAI('department', 'Department from enrich_metadata', 'string') }}",
+            "routing_tag": "={{ $fromAI('routing_tag', 'Routing tag from enrich_metadata', 'string') }}",
+            "sensitivity": "={{ $fromAI('sensitivity', 'Sensitivity from enrich_metadata', 'string') }}",
+            "confidence_score": "={{ $fromAI('confidence_score', 'Confidence score', 'string') }}",
+            "summary": "={{ $fromAI('summary', '2-3 sentence summary', 'string') }}",
+            "key_findings": "={{ $fromAI('key_findings', 'Key findings separated by semicolons', 'string') }}",
+            "action_items": "={{ $fromAI('action_items', 'Action items separated by semicolons', 'string') }}",
+            "processed_at": "={{ $fromAI('processed_at', 'processed_at from enrich_metadata', 'string') }}",
+            "file_type": "={{ $fromAI('file_type', 'File extension: pdf, docx, or txt', 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheetsTool",
+      "typeVersion": 4.7,
+      "position": [
+        6928,
+        1280
+      ],
+      "id": "448b2f1f-e3f4-4b6e-afd9-60e871300ba8",
+      "name": "append_row1",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "nR4tCeJQhsO0I9tM",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $fromAI('To', 'Recipient email — use notification_email from input', 'string') }}",
+        "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Subject', ``, 'string') }}",
+        "message": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Message', ``, 'string') }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmailTool",
+      "typeVersion": 2.2,
+      "position": [
+        7056,
+        1280
+      ],
+      "id": "4647d6c2-3015-48e5-b12f-97819bf12421",
+      "name": "send_notification1",
+      "webhookId": "a9d72f11-c451-4b6c-a3c1-dddc75b3ba70",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "1wPmfrUtPcF6fKiV",
+          "name": "Gmail account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const prep = $('Prepare Agent Context').first().json;\nconst agent = $input.first().json;\nconst raw = agent.output || agent.text || JSON.stringify(agent);\n\nlet parsed = {};\ntry {\n  const cleaned = String(raw).replace(/^```json\\s*/i, '').replace(/\\s*```$/, '').trim();\n  parsed = JSON.parse(cleaned);\n} catch {\n  try {\n    parsed = JSON.parse(prep.analysis_json || '{}');\n  } catch {\n    parsed = { summary: String(raw) };\n  }\n}\n\nconst m = parsed.financial_metrics || {};\nconst revenue = parsed.revenue || m.revenue || '';\nconst netIncome = parsed.net_income || m.net_income || '';\nconst eps = parsed.eps || m.eps || '';\nconst expenses = parsed.expenses || m.expenses || '';\nconst cashFlow = m.cash_flow || '';\nconst guidance = parsed.guidance || m.guidance || '';\nconst keyFindings = Array.isArray(parsed.key_findings) ? parsed.key_findings.join('; ') : (parsed.key_findings || '');\nconst risks = Array.isArray(parsed.risks) ? parsed.risks.join('; ') : (parsed.risks || '');\nconst actionItems = Array.isArray(parsed.action_items) ? parsed.action_items.join('; ') : (parsed.action_items || '');\n\nconst filename = prep.filename;\nconst summaryFilename = filename.replace(/\\.[^.]+$/, '') + '_summary.md';\n\nconst markdown = [\n  '# Financial Report Analysis',\n  '',\n  '## Company',\n  `${parsed.company || 'Unknown'} (${parsed.ticker || 'N/A'})`,\n  '',\n  '## Period',\n  `${parsed.fiscal_quarter || ''} ${parsed.fiscal_year || ''}`.trim(),\n  '',\n  '## Document Type',\n  parsed.document_type || '',\n  '',\n  '## Summary',\n  parsed.summary || '',\n  '',\n  '## Key Metrics',\n  `- Revenue: ${revenue}`,\n  `- Net Income: ${netIncome}`,\n  `- EPS: ${eps}`,\n  `- Expenses: ${expenses}`,\n  `- Cash Flow: ${cashFlow}`,\n  `- Guidance: ${guidance}`,\n  '',\n  '## Sentiment',\n  parsed.sentiment || '',\n  '',\n  '## Risk Level',\n  parsed.risk_level || '',\n  '',\n  '## Key Findings',\n  keyFindings,\n  '',\n  '## Risks',\n  risks,\n  '',\n  '## Action Items',\n  actionItems,\n].join('\\n');\n\nreturn [{ json: { markdown, summary_filename: summaryFilename } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7264,
+        1056
+      ],
+      "id": "ca5491b3-3288-4b39-b426-02cadafca060",
+      "name": "Build Summary Markdown1"
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "markdown",
+        "options": {
+          "fileName": "={{ $json.summary_filename }}"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        7488,
+        1056
+      ],
+      "id": "5057cfe3-6626-4f2a-b842-8a14f3cd639b",
+      "name": "Convert to File1"
+    },
+    {
+      "parameters": {
+        "name": "={{ $('Build Summary Markdown1').item.json.summary_filename }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "1ddQilM2SRq-KMVJ_efrQj4xIvAsvPDCp",
+          "mode": "list",
+          "cachedResultName": "OZ_Flow_Cloud_Output",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1ddQilM2SRq-KMVJ_efrQj4xIvAsvPDCp"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        7712,
+        1056
+      ],
+      "id": "9cb6b9df-b6bd-4ce5-8677-30d33f96a76a",
+      "name": "Upload Summary to Drive1",
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "3voXmh99weSXmHNj",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Assignment-aligned workflow\n\n1. Create **Header Auth** credential: header `x-goog-api-key`, same Gemini key\n2. Assign to **Gemini HTTP Analyze** node\n3. Add `file_type` column to Google Sheet (after filename)\n4. FastAPI: `uvicorn main:app --port 8000`\n5. Activate workflow, upload NEW pdf/docx/txt from Mac",
+        "height": 260,
+        "width": 420
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        4384,
+        784
+      ],
+      "typeVersion": 1,
+      "id": "c120024e-7170-40f8-ac21-2637ff9985ba",
+      "name": "Setup Notes1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Validate Extracted Text": {
+      "main": [
+        [
+          {
+            "node": "Prepare Document Input1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Gemini Prompt": {
+      "main": [
+        [
+          {
+            "node": "Gemini HTTP Analyze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini HTTP Analyze": {
+      "main": [
+        [
+          {
+            "node": "Parse Gemini JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Gemini JSON": {
+      "main": [
+        [
+          {
+            "node": "Prepare Agent Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Agent Context": {
+      "main": [
+        [
+          {
+            "node": "Financial Report Agent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Drive Trigger1": {
+      "main": [
+        [
+          {
+            "node": "Download File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download File1": {
+      "main": [
+        [
+          {
+            "node": "Validate File Type1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate File Type1": {
+      "main": [
+        [
+          {
+            "node": "Extract Text1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Text1": {
+      "main": [
+        [
+          {
+            "node": "Validate Extracted Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Document Input1": {
+      "main": [
+        [
+          {
+            "node": "Build Gemini Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Financial Report Agent1": {
+      "main": [
+        [
+          {
+            "node": "Build Summary Markdown1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Financial Report Agent1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "enrich_metadata1": {
+      "ai_tool": [
+        [
+          {
+            "node": "Financial Report Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "append_row1": {
+      "ai_tool": [
+        [
+          {
+            "node": "Financial Report Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "send_notification1": {
+      "ai_tool": [
+        [
+          {
+            "node": "Financial Report Agent1",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary Markdown1": {
+      "main": [
+        [
+          {
+            "node": "Convert to File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File1": {
+      "main": [
+        [
+          {
+            "node": "Upload Summary to Drive1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "e65047c6-21f6-4253-898f-b682acec9f4a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ec7f32b7056cf7ca67eb5b57db9848827534e0ddd74f3e9476a51300870a8d54"
+  },
+  "nodeGroups": [],
+  "id": "qLbOP2yWkqdbFEnv",
+  "tags": []
+}
